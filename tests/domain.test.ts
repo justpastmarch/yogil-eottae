@@ -1,0 +1,11 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {meters,samplesFor,summary,rankRoutes,validateFinding,type Route,type Evidence} from '../lib/domain.ts';
+const a:[number,number]=[127,37],b:[number,number]=[127,37.01];
+const route:Route={id:'r',name:'r',options:[],coords:[a,b],distance:1112,seconds:0,steps:[],samples:samplesFor([a,b]),fetchedAt:''};
+test('long segments get interpolated inspection points, including arrival',()=>{assert.ok(route.samples.length>20);assert.deepEqual(route.samples.at(-1)?.coord,b);for(let i=1;i<route.samples.length;i++)assert.ok(meters(route.samples[i-1].coord,route.samples[i].coord)<=51);});
+test('empty coverage never becomes a clear route',()=>{const s=summary(route,{});assert.equal(s.unknown,s.total);assert.equal(s.clear,0);});
+test('invisible path overrides a model clear verdict',()=>{assert.equal(validateFinding({status:'clear',reason:'r',pathVisible:false,evidence:[],limitations:[]}).status,'unknown');});
+test('reject malformed model output',()=>{assert.throws(()=>validateFinding({status:'clear',reason:'ok'}));});
+test('a blocked route ranks behind a nonblocked route even if shorter',()=>{const r2={...route,id:'r2',distance:2000};const e:Evidence={sampleId:route.samples[0].id,status:'blocked',reason:'stairs',checkedAt:''};assert.equal(rankRoutes([route,r2],{'r:s0':e})[0].id,'r2');});
+test('critical points between samples are retained',()=>{const point:[number,number]=[127,37.000225];const s=samplesFor([a,b],[point]);assert.ok(s.some(v=>v.critical&&meters(v.coord,point)<1));});

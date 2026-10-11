@@ -1,0 +1,16 @@
+'use client';
+import {useEffect,useRef,useState} from 'react';
+import type * as Leaflet from 'leaflet';
+import type {Coord,Evidence,Place,Route} from '@/lib/domain';
+export default function MapView({routes,selected,evidence,start,end,onPoint,onEvidence,focus}:{routes:Route[];selected:string;evidence:Record<string,Evidence>;start:Place|null;end:Place|null;onPoint:(p:Coord)=>void;onEvidence:(id:string)=>void;focus:Coord|null}){
+ const div=useRef<HTMLDivElement>(null),map=useRef<Leaflet.Map|null>(null),layer=useRef<Leaflet.LayerGroup|null>(null),api=useRef<typeof Leaflet|null>(null),handlers=useRef({onPoint,onEvidence});handlers.current={onPoint,onEvidence};const [ready,setReady]=useState(false),[error,setError]=useState(false);
+ useEffect(()=>{let disposed=false;import('leaflet').then(L=>{if(disposed||!div.current)return;api.current=L;const m=L.map(div.current,{zoomControl:false}).setView([37.245,127.071],15);map.current=m;L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).on('tileerror',()=>setError(true)).addTo(m);L.control.zoom({position:'bottomright'}).addTo(m);layer.current=L.layerGroup().addTo(m);m.on('click',(e:Leaflet.LeafletMouseEvent)=>handlers.current.onPoint([e.latlng.lng,e.latlng.lat]));setReady(true);});return()=>{disposed=true;map.current?.remove();map.current=null;};},[]);
+ useEffect(()=>{const L=api.current,m=map.current,g=layer.current;if(!ready||!L||!m||!g)return;g.clearLayers();
+ const icon=(text:string,color:string)=>L.divIcon({className:'map-pin-wrap',html:`<div class="map-pin" style="background:${color}">${text}</div>`,iconSize:[32,38],iconAnchor:[16,36]});
+ [...routes].sort((a,b)=>Number(a.id===selected)-Number(b.id===selected)).forEach(r=>{L.polyline(r.coords.map(c=>[c[1],c[0]] as [number,number]),{color:r.id===selected?'#176b55':'#8192b1',weight:r.id===selected?7:5,opacity:r.id===selected?1:.6}).addTo(g);if(r.id===selected)r.samples.forEach(s=>{const id=r.id+':'+s.id,e=evidence[id];const color=e?.status==='blocked'?'#cb514d':e?.status==='clear'?'#258464':e?.status==='caution'?'#d89c3f':'#87918e';L.circleMarker([s.coord[1],s.coord[0]],{radius:5,color:'#fff',weight:2,fillColor:color,fillOpacity:1}).on('click',ev=>{L.DomEvent.stopPropagation(ev);handlers.current.onEvidence(id);}).addTo(g);});});
+ if(start)L.marker([start.coord[1],start.coord[0]],{icon:icon('출','#176b55')}).addTo(g);if(end)L.marker([end.coord[1],end.coord[0]],{icon:icon('도','#343e5a')}).addTo(g);
+ },[ready,routes,selected,evidence,start,end]);
+ useEffect(()=>{if(!ready||!map.current)return;const r=routes.find(r=>r.id===selected);if(r)map.current.fitBounds(r.coords.map(c=>[c[1],c[0]]),{padding:[60,60]});else if(start&&end)map.current.fitBounds([[start.coord[1],start.coord[0]],[end.coord[1],end.coord[0]]],{padding:[60,60]});else if(start||end){const p=(start||end)!;map.current.setView([p.coord[1],p.coord[0]],17);}},[ready,routes,selected,start,end]);
+ useEffect(()=>{if(focus&&map.current)map.current.setView([focus[1],focus[0]],18);},[focus]);
+ return <><div className="map" ref={div} aria-label="확대·축소하고 출발지와 도착지를 선택할 수 있는 지도"/>{error&&<div className="tile-error">지도 타일 연결이 원활하지 않습니다. 네트워크를 확인해 주세요.</div>}</>;
+}
