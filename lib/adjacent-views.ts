@@ -13,7 +13,7 @@ export function adjacentSamples(route:Route, sample:Sample):{id:string;sample:Sa
 export function evidenceSource(image:StreetImage, target:Sample):EvidenceSource {
     return {...image.source,distance:Math.round(meters(target.coord,image.source.coord))};
 }
-export function panoramaIdentity(source:StreetImage['source']):string {
+export function panoramaIdentity(source:Pick<StreetImage['source'],'url'|'coord'|'capturedAt'|'capturedMonth'|'panoId'>):string {
     if(source.panoId)return 'kakao:'+source.panoId;
     const url=new URL(source.url);
     return url.searchParams.get('panoid') ? 'kakao:'+url.searchParams.get('panoid') : url.searchParams.get('pKey') ? 'mapillary:'+url.searchParams.get('pKey') : `${source.coord.join(',')}:${source.capturedMonth??source.capturedAt}`;

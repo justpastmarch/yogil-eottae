@@ -1,4 +1,4 @@
-import {captureAdjacentViews,evidenceSource} from './adjacent-views.ts';
+import {captureAdjacentViews,evidenceSource,panoramaIdentity} from './adjacent-views.ts';
 import {routeImageContext} from './route-context.ts';
 import {z} from 'zod';
 import {projectOnRoute,meters,recommendedRoute,inspectionOrder,type Evidence,type JourneyResult,type Place,type Coord,type Route} from './domain.ts';
@@ -99,10 +99,11 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
             review.sources=captured.views.map(view=>({id:view.id,source:evidenceSource(view.image,sample)}));
             if(!captured.views.length){state.analyses--;review.note='전후 거리영상을 확보하지 못해 기존 판정을 유지했습니다.';return;}
             const result=await deps.analyzeKhuViews({apiKey:config.ai,model:config.model,views:captured.views.map(view=>({id:view.id,image:view.image.image})),profile:state.profile,context:'원래 판정: '+JSON.stringify(review.initialFinding)+'\n원래 목표 좌표: '+JSON.stringify(sample.coord)+'\n'+captured.context,signal:AbortSignal.any([signal,AbortSignal.timeout(35000)])});
-            const independent=captured.views.filter((view,index,all)=>all.slice(0,index).every(other=>meters(other.image.source.coord,view.image.source.coord)>=1)).length;
-            const joint=validateJointFinding(result.review,captured.views.map(view=>view.id),independent);
+            const initialIdentity=panoramaIdentity(review.initialSource);
+            const independentSupportIds=captured.views.filter(view=>panoramaIdentity(view.image.source)!==initialIdentity&&meters(review.initialSource.coord,view.image.source.coord)>=1).map(view=>view.id);
+            const joint=validateJointFinding(result.review,captured.views.map(view=>view.id),independentSupportIds);
             review.result=joint.finding;review.supportIds=joint.supportIds;
-            review.note=independent>=2?'서로 다른 촬영 위치의 전후 영상을 대조했습니다.':'서로 다른 촬영 위치가 충분하지 않아 원래 가려진 연결부를 확정하지 않았습니다.';
+            review.note=independentSupportIds.length>0?'서로 다른 촬영 위치의 전후 영상을 대조했습니다.':'서로 다른 촬영 위치가 충분하지 않아 원래 가려진 연결부를 확정하지 않았습니다.';
             if(!(item.status==='blocked'&&item.finding?.routeMatch==='same-path')){
                 item.finding=joint.finding;item.status=joint.finding.status;item.reason=joint.finding.reason;item.checkedAt=result.checkedAt;
             }
@@ -142,7 +143,7 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
         const result=await deps.analyzeKhuImage({apiKey:config.ai,model:config.model,image:image.image,profile:state.profile,context:routeImageContext({route,sample,source:image.source}),signal});
         finding={sampleId:sample.id,stage:'processed',status:result.finding.status,reason:result.finding.reason,finding:result.finding,source:evidenceSource(image,sample),checkedAt:result.checkedAt};
         const reason=result.finding.reviewReason==='occlusion'||result.finding.visibility==='occluded'?'occlusion':'corridor-uncertain';
-        if(result.finding.status==='unknown'||result.finding.status==='caution'||result.finding.reviewReason==='occlusion'||result.finding.visibility==='occluded')finding.review={state:'pending',reason,initialFinding:result.finding,initialSource:evidenceSource(image,sample),sources:[],supportIds:[],note:'전후 거리영상에서 같은 연결부를 다시 살펴볼 예정입니다.'};
+        if(result.finding.status==='unknown'||result.finding.status==='caution'||result.finding.reviewReason==='corridor-uncertain'||result.finding.reviewReason==='occlusion'||result.finding.visibility==='occluded')finding.review={state:'pending',reason,initialFinding:result.finding,initialSource:evidenceSource(image,sample),sources:[],supportIds:[],note:'전후 거리영상에서 같은 연결부를 다시 살펴볼 예정입니다.'};
         state.evidence[key]=finding;
     }catch(error){
         state.evidence[key]={sampleId:sample.id,stage:'processed',status:'unknown',reason:'이 구간의 이동 환경 정보를 가져오지 못했습니다.',checkedAt:new Date().toISOString()};

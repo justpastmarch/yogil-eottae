@@ -106,14 +106,14 @@ export const jointFindingSchema = z.object({
     originalConnectionVisible: z.boolean(),
 });
 export type JointFinding = z.infer<typeof jointFindingSchema>;
-export function validateJointFinding(value:unknown, allowedIds:string[], independentPanoramas:number):JointFinding {
+export function validateJointFinding(value:unknown, allowedIds:string[], independentSupportIds:string[]):JointFinding {
     const parsed=jointFindingSchema.parse(value);
     const ids=parsed.views.map(view=>view.id);
     if(ids.length!==allowedIds.length||new Set(ids).size!==ids.length||ids.some(id=>!allowedIds.includes(id))||parsed.supportIds.some(id=>!ids.includes(id))) throw new KhuError('여러 사진의 근거 대응을 확인할 수 없습니다.');
     let finding=validateFinding(parsed.finding);
     const supported=parsed.supportIds.length>0&&parsed.supportIds.every(id=>parsed.views.some(view=>view.id===id&&view.sameCorridor&&view.targetPatchVisible));
     if(finding.status==='blocked'&&!supported)finding=validateFinding({...finding,status:'unknown',reason:'같은 통로의 목표 구간에서 장애물을 확인한 사진 근거가 없습니다.'});
-    if(finding.status==='clear'&&(!supported||!parsed.originalConnectionVisible||independentPanoramas<2)) finding=validateFinding({...finding,status:'unknown',reason:'원래 가려진 연결부를 서로 다른 촬영 위치에서 확인하지 못했습니다.',visibility:'unobservable'});
+    if(finding.status==='clear'&&(!supported||!parsed.originalConnectionVisible||!parsed.supportIds.some(id=>independentSupportIds.includes(id)))) finding=validateFinding({...finding,status:'unknown',reason:'원래 가려진 연결부를 서로 다른 촬영 위치에서 확인하지 못했습니다.',visibility:'unobservable'});
     return {...parsed,finding:currentFindingSchema.parse(finding)};
 }
 export async function analyzeKhuViews({apiKey,model,views,profile,context,signal}: {

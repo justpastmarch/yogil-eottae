@@ -14,13 +14,13 @@ function joint(){return {finding:clear,views:[{id:'center',sameCorridor:true,tar
 function state():JourneyState{return {version:1,start:{id:'a',name:'a',address:'',coord:route.coords[0]},end:{id:'b',name:'b',address:'',coord:route.coords[1]},profile:'수동 휠체어',candidates:[route],evidence:{['r:'+sample.id]:{sampleId:sample.id,stage:'processed',status:'caution',reason:initial.reason,finding:initial,source:{url:'https://map.kakao.com/?panoid=1',capturedAt:Date.now(),coord:sample.coord,heading:sample.heading,distance:0},checkedAt:'',review:{state:'pending',reason:'occlusion',initialFinding:initial,initialSource:{url:'https://map.kakao.com/?panoid=1',capturedAt:Date.now(),coord:sample.coord,distance:0},sources:[],supportIds:[],note:''}}},exclusions:[],pendingReplans:[],lookups:1,analyses:1,replans:0,phase:'running'};}
 test('single visible walkway cannot be clear when the connection is occluded',()=>{assert.equal(validateFinding({...initial,status:'clear'}).status,'caution');});
 test('joint review requires actual target support on the same corridor and distinct panoramas',()=>{
- assert.equal(validateJointFinding(joint(),['center','after'],2).finding.status,'clear');
- assert.equal(validateJointFinding(joint(),['center','after'],1).finding.status,'unknown');
- assert.equal(validateJointFinding({...joint(),originalConnectionVisible:false},['center','after'],2).finding.status,'unknown');
- assert.equal(validateJointFinding({...joint(),supportIds:['after']},['center','after'],2).finding.status,'unknown');
- assert.equal(validateJointFinding({...joint(),views:joint().views.map(view=>({...view,sameCorridor:false}))},['center','after'],2).finding.status,'unknown');
- assert.throws(()=>validateJointFinding({...joint(),supportIds:['fabricated']},['center','after'],2));
- assert.throws(()=>validateJointFinding({...joint(),views:[{id:'center'}]},['center'],2));
+ assert.equal(validateJointFinding(joint(),['center','after'],['center']).finding.status,'clear');
+ assert.equal(validateJointFinding(joint(),['center','after'],[]).finding.status,'unknown');
+ assert.equal(validateJointFinding({...joint(),originalConnectionVisible:false},['center','after'],['after']).finding.status,'unknown');
+ assert.equal(validateJointFinding({...joint(),supportIds:['after']},['center','after'],['after']).finding.status,'unknown');
+ assert.equal(validateJointFinding({...joint(),views:joint().views.map(view=>({...view,sameCorridor:false}))},['center','after'],['after']).finding.status,'unknown');
+ assert.throws(()=>validateJointFinding({...joint(),supportIds:['fabricated']},['center','after'],['after']));
+ assert.throws(()=>validateJointFinding({...joint(),views:[{id:'center'}]},['center'],['center']));
 });
 test('ordered adjacent points follow traversal through a self-crossing instead of snapping to another branch',()=>{
  const crossing:Route={...route,coords:[[127,37],[127.001,37],[127.001,37.001],[127,37.001],[127,37],[127.001,37]],samples:[]};
@@ -58,4 +58,25 @@ test('exact provider stair instruction excludes stairs without fabricating visua
  assert.equal(providerStairSamples(stairs,'유아차').length,1);
  assert.equal(providerStairSamples({...route,steps:[{text:'계단 옆 보도 이용',coord:sample.coord}]},'수동 휠체어').length,0);
  assert.equal(providerStairSamples(stairs,'보행 보조기').length,1);
+});
+
+test('an unrelated new panorama cannot support a clear verdict assigned only to the initial view',()=>{
+ assert.equal(validateJointFinding(joint(),['center','after'],['after']).finding.status,'unknown');
+ const newSupport={...joint(),views:joint().views.map(view=>({...view,targetPatchVisible:true})),supportIds:['after']};
+ assert.equal(validateJointFinding(newSupport,['center','after'],['after']).finding.status,'clear');
+});
+test('contradictory clear with corridor uncertainty stays unknown and cannot bypass review',()=>{
+ const finding=validateFinding({...clear,reviewReason:'corridor-uncertain'});
+ assert.equal(finding.status,'unknown');assert.equal(finding.routeMatch,'uncertain');
+});
+test('recovery uses camera metadata of the supporting view rather than unrelated nearby images',async()=>{
+ for(const support of ['center','after']){
+  const s=state(),item=s.evidence['r:'+sample.id],op=reserveJourneyOperation(s);assert.ok(op);
+  await advanceJourneyState(s,op,config,new AbortController().signal,{
+   streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+point.along,panoId:String(point.along),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),
+   analyzeKhuImage:async()=>{throw Error('unexpected single analysis');},reroute:async()=>{throw Error('unexpected reroute');},
+   analyzeKhuViews:async({views})=>({checkedAt:'',review:{finding:clear,views:views.map(view=>({id:view.id,sameCorridor:view.id===support,targetPatchVisible:view.id===support,observation:'only the supporting view shows the intended connection'})),supportIds:[support],originalConnectionVisible:true}}),
+  });
+  assert.equal(item.status,support==='center'?'unknown':'clear');
+ }
 });
