@@ -1,6 +1,6 @@
 import {bearing, meters, type EvidenceSource, type Route, type Sample} from './domain.ts';
 import {pointAt, routeImageContext} from './route-context.ts';
-import {streetImage, type StreetImage} from './street-imagery.ts';
+import {streetImage, ImageryServiceError, type StreetImage} from './street-imagery.ts';
 import type {ServerConfig} from './server-config.ts';
 
 export function adjacentSamples(route:Route, sample:Sample):{id:string;sample:Sample}[] {
@@ -22,15 +22,17 @@ export async function captureAdjacentViews({route,sample,limit,config,signal,cap
     const requests=adjacentSamples(route,sample).slice(0,limit);
     const views:{id:string;image:StreetImage}[]=[];
     let next=0,attempts=0;
+    let outage:ImageryServiceError|undefined;
     const deadline=AbortSignal.any([signal,AbortSignal.timeout(25000)]);
     await Promise.all([0,1].map(async()=>{
         while(next<requests.length&&!deadline.aborted){
             const item=requests[next++]; attempts++;
             try { const image=await capture(item.sample,config,deadline,{target:sample.coord}); if(image)views.push({id:item.id,image}); }
-            catch { signal.throwIfAborted(); }
+            catch(error) { signal.throwIfAborted(); if(error instanceof ImageryServiceError&&error.status>=500)outage=error; }
         }
     }));
     signal.throwIfAborted();
+    if(!views.length&&outage)throw outage;
     const distinct=views.filter((view,index,all)=>all.findIndex(other=>panoramaIdentity(other.image.source)===panoramaIdentity(view.image.source))===index);
     return {views:distinct,attempts,context:distinct.map(view=>'사진 ID: '+view.id+'\n'+routeImageContext({route,sample,source:view.image.source})).join('\n')};
 }

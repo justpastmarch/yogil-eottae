@@ -225,3 +225,18 @@ test('missing images and failed capture attempts finish unknown without invented
         assert.equal(projectJourneyResult(s).recommendedId,null);
     }
 });
+
+test('imagery outage stops after one attempt and preserves routes without classifying remaining points',async()=>{
+ const s=state(),op=reserveJourneyOperation(s);assert.ok(op);
+ await advanceJourneyState(s,op,config,new AbortController().signal,{
+  streetImage:async()=>{throw new ImageryServiceError(503);},analyzeKhuImage:async()=>{throw Error('must not call AI without an image');},analyzeKhuViews:async()=>{throw Error('unexpected review');},reroute:async()=>{throw Error('unexpected reroute');},
+ });
+ assert.equal(s.phase,'limited');assert.equal(Object.keys(s.evidence).length,1);assert.equal(s.candidates.length,1);assert.equal(s.lookups,1);assert.match(s.notice??'',/거리영상 서비스에 연결하지 못해/);assert.equal(reserveJourneyOperation(s),null);assert.equal(projectJourneyResult(s).recommendedId,null);
+ assert.equal(journeyStateSchema.parse(JSON.parse(JSON.stringify(s))).notice,s.notice);
+});
+test('genuine missing local coverage allows subsequent locations to be inspected',async()=>{
+ const s=state();let calls=0;
+ const deps={streetImage:async()=>{calls++;return null;},analyzeKhuImage:async()=>{throw Error('unexpected AI');},analyzeKhuViews:async()=>{throw Error('unexpected review');},reroute:async()=>{throw Error('unexpected reroute');}};
+ for(let index=0;index<2;index++){const op=reserveJourneyOperation(s);assert.ok(op);await advanceJourneyState(s,op,config,new AbortController().signal,deps);}
+ assert.equal(calls,2);assert.equal(Object.keys(s.evidence).length,2);assert.equal(s.phase,'running');assert.equal(s.notice,undefined);
+});

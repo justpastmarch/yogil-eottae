@@ -69,6 +69,7 @@ export async function streetImage(sample: Sample, config: ServerConfig, signal: 
         } catch (error) {
             signal.throwIfAborted();
             if(error instanceof ImageryServiceError && ([401,403,404].includes(error.status) || error.status===429&&!config.mapillary)) throw error;
+            if(!config.mapillary)throw new ImageryServiceError(503);
         }
     }
     return config.mapillary ? mapillary(options.target ? {...sample,heading:bearing(sample.coord,options.target)} : sample, config, signal) : null;

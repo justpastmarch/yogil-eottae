@@ -13,7 +13,7 @@ export const journeyPhase=z.enum(['running','ready','limited','failed','canceled
 const coord=z.tuple([z.number(),z.number()]);
 const place=z.object({id:z.string(),name:z.string(),address:z.string(),coord});
 export const journeyStateSchema=z.object({
-    version:z.literal(1),start:place,end:place,profile:z.string(),
+    version:z.literal(1),notice:z.string().optional(),start:place,end:place,profile:z.string(),
     candidates:journeyResponse.shape.routes,evidence:journeyResponse.shape.evidence,
     exclusions:z.array(z.object({id:z.string(),routeId:z.string(),sampleId:z.string(),fromAlong:z.number(),toAlong:z.number(),coords:z.array(coord)})),
     pendingReplans:z.array(z.array(coord)),lookups:z.number().int().nonnegative(),analyses:z.number().int().nonnegative(),replans:z.number().int().nonnegative(),phase:journeyPhase,
@@ -34,6 +34,7 @@ export function providerStairSamples(route:Route,profile:string):Route['samples'
         return projection&&projection.distance<=20?[{id:'provider-stairs-'+index,coord:projection.coord,along:projection.along,heading:projection.heading,critical:true}]:[];
     });
 }
+const imageryOutageNotice='거리영상 서비스에 연결하지 못해 분석을 중단했어요. 잠시 후 다시 시도해 주세요.';
 export async function createJourneyState(input:JourneyInput,config:ServerConfig,signal:AbortSignal):Promise<JourneyState>{
     const candidates=(await routes(input.start,input.end,config.routing,signal)).routes;
     const exclusions:JourneyState['exclusions']=[];
@@ -112,7 +113,7 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
                 if(!state.exclusions.some(existing=>existing.id===passage.id))state.exclusions.push(passage);
                 if(config.routing.kind==='kakao')state.pendingReplans=detourViaPlans(route,passage);
             }
-        } catch(error){review.note='전후 영상 대조를 완료하지 못해 기존 판정을 유지했습니다.';signal.throwIfAborted();if(error instanceof KhuError&&[401,402,403,404,429].includes(error.status))throw error;}
+        } catch(error){review.note='전후 영상 대조를 완료하지 못해 기존 판정을 유지했습니다.';signal.throwIfAborted();if(error instanceof ImageryServiceError&&error.status>=500){state.phase='limited';state.notice=imageryOutageNotice;return;}if(error instanceof KhuError&&[401,402,403,404,429].includes(error.status))throw error;}
         return;
     }
     if(operation.kind==='replan'){
@@ -148,6 +149,7 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
     }catch(error){
         state.evidence[key]={sampleId:sample.id,stage:'processed',status:'unknown',reason:'이 구간의 이동 환경 정보를 가져오지 못했습니다.',checkedAt:new Date().toISOString()};
         signal.throwIfAborted();
+        if(error instanceof ImageryServiceError&&error.status>=500){state.phase='limited';state.notice=imageryOutageNotice;return;}
         if(error instanceof ImageryServiceError&&error.status===429){state.phase='limited';return;}
         if(error instanceof ImageryServiceError&&[401,403,404].includes(error.status)||error instanceof KhuError&&[401,402,403,404,429].includes(error.status)) throw error;
         return;

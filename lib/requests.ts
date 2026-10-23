@@ -15,4 +15,4 @@ const evidence = z.object({ stage: z.enum(['reserved', 'processed']).optional(),
 export const journeyResponse = z.object({ routes: z.array(route), evidence: z.record(evidence), assessments:z.record(z.object({blockedPassageIds:z.array(z.string())})), recommendedId: z.string().nullable(), status: z.enum(['ready', 'limited']) });
 export const searchResponse = z.object({ places: z.array(place) });
 
-export const journeySnapshotResponse = z.object({jobId:z.string().uuid(),phase:z.enum(['running','ready','limited','failed','canceled']),journey:journeyResponse,progress:z.object({checked:z.number().int().min(0),total:z.number().int().min(0),analyses:z.number().int().min(0)})});
+export const journeySnapshotResponse = z.object({jobId:z.string().uuid(),phase:z.enum(['running','ready','limited','failed','canceled']),journey:journeyResponse,progress:z.object({checked:z.number().int().min(0),total:z.number().int().min(0),analyses:z.number().int().min(0),notice:z.string().optional()})});

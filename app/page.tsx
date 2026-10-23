@@ -131,7 +131,7 @@ export default function Page() {
             for (;;) {
                 if(task.generation!==request.current.generation || task.controller.signal.aborted) return;
                 const {journey,phase,progress}=snapshot;
-                setScreen({kind:'result',journey,analysis:{phase,checked:progress.checked,total:progress.total}});
+                setScreen({kind:'result',journey,analysis:{phase,checked:progress.checked,total:progress.total,message:progress.notice}});
                 if(phase!=='running') { request.current.jobId=null; break; }
                 await new Promise(resolve=>setTimeout(resolve,350));
                 if(task.generation!==request.current.generation || task.controller.signal.aborted) return;
@@ -159,6 +159,7 @@ export default function Page() {
  <div className="location-status">{start ? <><Check size={12}/> 출발지 선택</> : <>출발지 입력</>}<span>·</span>{end ? <><Check size={12}/> 도착지 선택</> : <>도착지 입력</>}</div></section>}
  {screen.kind === 'error' && <div className="notice" role="alert">{screen.message}</div>}
  {screen.kind === 'result' && analyzing && <div className="progress" role="status"><LoaderCircle size={17} className="spin"/><span>전체 후보 {routes.length}개 · {screen.analysis.total}지점 중 {screen.analysis.checked}지점 분석 시도 완료</span><button onClick={()=>{stopJob();setScreen({...screen,analysis:{...screen.analysis,phase:'canceled'}});}}>중지</button></div>}
+ {screen.kind === 'result' && screen.analysis.phase==='limited' && screen.analysis.message && <div className="notice" role="alert">{screen.analysis.message}</div>}
  {screen.kind === 'result' && screen.analysis.phase==='failed' && <div className="notice" role="alert">{screen.analysis.message ?? '이동 환경 분석을 완료하지 못했어요. 조회한 경로를 비교해 보세요.'}</div>}
  {screen.kind === 'loading' && <div className="progress" role="status"><LoaderCircle size={17} className="spin"/><span>{screen.message}</span></div>}
  {detailRoute && screen.kind==='result' ? <RouteDetails key={detailRoute.id} route={detailRoute} evidence={evidence} phase={screen.analysis.phase} activeId={active} hasExcludedPassage={(journey?.assessments[detailRoute.id]?.blockedPassageIds.length??0)>0} onBack={closeDetails} onLocate={sample=>{setActive(detailRoute.id+':'+sample.id);setFocus([sample.coord[0],sample.coord[1]]);}}/> : <div className="results-scroll" ref={listScroll}>{!journey ? <section className="empty-state"><div className="eyebrow">오늘의 이동</div><h2>나에게 편한 길로,<br />목적지까지.</h2><p>출발지와 도착지를 선택하면<br />이동 환경을 고려한 경로를 찾아드려요.</p><div className="journey-graphic"><div className="graphic-line"/><span className="graphic-start"><MapPin size={22}/></span><span className="graphic-person"><Accessibility size={32}/></span><span className="graphic-end"><Check size={20}/></span></div></section> : <section className="routes-section"><div className="section-title"><h2>이동 경로 <span>{routes.length}</span></h2></div>

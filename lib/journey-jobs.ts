@@ -8,13 +8,13 @@ const LEASE_MS=90_000;
 const STEP_MS=65_000;
 const rowSchema=z.object({id:z.string(),state:z.string(),phase:journeyStateSchema.shape.phase,revision:z.number().int(),lease_token:z.string().nullable(),lease_until:z.number(),expires_at:z.number()});
 type JobRow=z.infer<typeof rowSchema>;
-export type JourneySnapshot={jobId:string;phase:JourneyState['phase'];journey:JourneyResult;progress:{checked:number;total:number;analyses:number}};
+export type JourneySnapshot={jobId:string;phase:JourneyState['phase'];journey:JourneyResult;progress:{checked:number;total:number;analyses:number;notice?:string}};
 export class JourneyJobError extends Error{
     status:number;
     constructor(status:number){super(status===404?'이 경로 탐색이 만료되었거나 존재하지 않습니다.':'경로 탐색을 이어갈 수 없습니다.');this.status=status;}
 }
 function snapshot(id:string,state:JourneyState):JourneySnapshot{
-    return {jobId:id,phase:state.phase,journey:projectJourneyResult(state),progress:{checked:Object.values(state.evidence).filter(e=>e.stage!=='reserved').length,total:state.candidates.reduce((n,r)=>n+r.samples.length,0),analyses:state.analyses}};
+    return {jobId:id,phase:state.phase,journey:projectJourneyResult(state),progress:{checked:Object.values(state.evidence).filter(e=>e.stage!=='reserved').length,total:state.candidates.reduce((n,r)=>n+r.samples.length,0),analyses:state.analyses,...(state.notice?{notice:state.notice}:{})}};
 }
 function decode(row:JobRow):JourneyState{
     const state=journeyStateSchema.parse(JSON.parse(row.state));
