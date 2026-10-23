@@ -1,4 +1,7 @@
-// Intentionally empty by default.
-// Add Drizzle tables here when the site actually needs a database.
-// See examples/d1/db/schema.ts for an opt-in example.
-export {};
+import {sqliteTable,text,integer,index} from 'drizzle-orm/sqlite-core';
+export const journeyJobs=sqliteTable('journey_jobs',{
+    id:text('id').primaryKey(),ownerId:text('owner_id').notNull(),state:text('state').notNull(),
+    phase:text('phase').notNull(),revision:integer('revision').notNull().default(0),
+    leaseToken:text('lease_token'),leaseUntil:integer('lease_until').notNull().default(0),
+    expiresAt:integer('expires_at').notNull(),updatedAt:integer('updated_at').notNull(),
+},table=>[index('journey_jobs_expiry').on(table.expiresAt)]);

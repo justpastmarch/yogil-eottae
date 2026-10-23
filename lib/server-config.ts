@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { z } from 'zod';
 const names = ['KAKAO_JAVASCRIPT_KEY', 'KAKAO_REST_API_KEY', 'TMAP_API_KEY', 'CHATKHU_API_KEY', 'CHATKHU_MODEL', 'MAPILLARY_TOKEN', 'ROADVIEW_RENDERER_URL', 'ROADVIEW_RENDERER_TOKEN'] as const;
-export type ServerEnv = Partial<Record<typeof names[number], string>>;
+export type ServerEnv = Partial<Record<typeof names[number], string>> & {DB?: D1Database};
 export type RoutingConfig = { kind: 'kakao'; restKey: string } | { kind: 'tmap'; apiKey: string };
 const context = new AsyncLocalStorage<ServerEnv>();
 export function runWithServerEnv<T>(env: ServerEnv, run: () => T): T { return context.run(env, run); }
@@ -28,4 +28,10 @@ export function routingConfig(): RoutingConfig {
 }
 export function publicMapConfig() {
     return {javascriptKey:z.string().trim().regex(/^[a-f0-9]{32}$/i).parse((context.getStore() ?? process.env).KAKAO_JAVASCRIPT_KEY)};
+}
+
+export function serverDatabase(): D1Database {
+    const db=context.getStore()?.DB;
+    if(!db) throw new Error('Journey database is unavailable.');
+    return db;
 }
