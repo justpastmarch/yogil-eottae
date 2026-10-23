@@ -45,11 +45,12 @@ export function reserveJourneyOperation(state:JourneyState):JourneyOperation|nul
     if(state.lookups>=60||state.analyses>=48){state.phase='limited';return null;}
     for(const route of state.candidates){
         if(state.exclusions.some(p=>routeTouchesPassage(route,p))) continue;
+        if(route.samples.some(sample=>{const finding=state.evidence[route.id+':'+sample.id];return finding&&finding.status!=='clear';})) continue;
         const sample=inspectionOrder([route]).map(item=>item.sample).find(sample=>!state.evidence[route.id+':'+sample.id]);
         if(!sample) continue;
         state.lookups++;
         state.analyses++;
-        state.evidence[route.id+':'+sample.id]={sampleId:sample.id,status:'unknown',reason:'이 구간의 이동 환경을 분석하고 있습니다.',checkedAt:new Date().toISOString()};
+        state.evidence[route.id+':'+sample.id]={sampleId:sample.id,status:'unknown',reason:'이 구간의 통행 상태를 아직 판정하지 못했습니다.',checkedAt:new Date().toISOString()};
         return {kind:'capture',route,sample};
     }
     state.phase=projectJourneyResult(state).recommendedId?'ready':'limited';
@@ -69,7 +70,6 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
             }
         }catch(error){
             signal.throwIfAborted();
-            if(error instanceof Error&&'status' in error&&error.status===503) state.phase='limited';
         }
         return;
     }

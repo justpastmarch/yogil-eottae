@@ -1,4 +1,19 @@
-# vinext-starter
+# 길이음
+
+실제 도보 후보 경로의 거리영상을 서버에서 분석하고, 관찰된 통행 장애 구간을 피하는 대체 경로를 찾는 웹앱입니다. 사용자는 지도에서 장소와 이동 수단을 선택합니다. API 키, 이미지 캡처, 모델 호출은 서버에서 처리합니다.
+
+- Kakao 도보 API의 세 가지 모드를 조회하고 중복 경로를 합칩니다. 같은 통로의 장애가 관찰되면 실제 경유지 경로를 다시 조회합니다.
+- 별도 Node 서비스가 Playwright로 실제 거리영상을 캡처합니다. 설치와 실행은 `services/roadview-renderer/README.md`를 따릅니다. Worker 안에서는 브라우저를 실행하지 않습니다.
+- ChatKHU는 이미지 픽셀과 진행 방향을 받아 통로 대응 및 이동 요소를 분석합니다. 현재 기본 모델은 `gemini-3.8-flash`이며 환경 설정으로 변경합니다.
+- D1에는 사용자별 분석 진행 상태를 저장합니다. 각 요청은 한 번의 영상 분석 또는 경로 재탐색을 수행합니다. 작업은 30분 후 접근할 수 없고, 새 작업 생성 시 만료 행을 정리합니다. 이미지와 API 키는 저장하지 않습니다.
+- 모든 지정 지점이 clear이고 관찰된 장애 통로와 겹치지 않는 경로에만 추천 표시를 붙입니다. 사진이 없거나 보행 통로를 식별하지 못하면 통행 가능으로 처리하지 않습니다. 현장 검증을 대체하는 보장은 아닙니다.
+- 최대 경사도 설정과 지형 고도 기반 경사 계산은 아직 구현하지 않았습니다. 사진에서 수치 경사도를 추정하지 않습니다.
+
+`.env.example`의 이름으로 서버 환경을 구성합니다. 개발 지도 도메인으로 `http://localhost:3000`을 등록하고, 로컬 DB에 아래 마이그레이션 절차를 적용한 뒤 `npm run dev`를 실행합니다. 배포 환경에는 HTTPS 렌더러 주소와 인증 토큰을 설정합니다. 임시 터널은 상시 호스팅을 대신하지 않습니다.
+
+검증은 `node --test tests/*.test.ts`, `npx tsc --noEmit --incremental false`, 렌더러 폴더의 `npm test`로 실행합니다. `scripts/verify-live-alternatives.mjs`는 실제 지도 API를 호출하지만 장애 구간은 시험용으로 주입합니다. 이 실험은 실제 현장 장애나 접근성을 입증하지 않습니다.
+
+## Framework operations
 
 A clean full-stack starter running on [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and Drizzle support.
 
@@ -43,7 +58,7 @@ Local tool usage metrics are disabled by default. Set `WRANGLER_SEND_METRICS=tru
 - `.openai/hosting.json` declares optional Sites D1 and R2 bindings
 - `vite.config.ts` simulates declared bindings for local development
 - `db/index.ts` reads the D1 binding from the Cloudflare Worker environment
-- `db/schema.ts` starts intentionally empty
+- `db/schema.ts` declares the expiring journey analysis job table
 - `@cloudflare/workers-types` provides Worker types; `cloudflare-env.d.ts` declares optional `DB`/`BUCKET` bindings—update these declarations if binding names change
 - `examples/d1/` contains an optional D1 example surface
 - `drizzle.config.ts` supports local migration generation when needed

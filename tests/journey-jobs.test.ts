@@ -50,8 +50,8 @@ test('interrupted capture reservation stays unknown and cannot recommend a route
     assert.equal(s.lookups,1);
     assert.equal(s.analyses,1);
     const second=reserveJourneyOperation(s);
-    assert.equal(second?.kind,'capture');
-    if(first?.kind==='capture'&&second?.kind==='capture') assert.notEqual(first.sample.id,second.sample.id);
+    assert.equal(second,null);
+    assert.equal(s.phase,'limited');
     assert.equal(projectJourneyResult(s).recommendedId,null);
 });
 test('renderer 429 retains real routes as limited instead of discarding them',async()=>{
@@ -63,15 +63,16 @@ test('renderer 429 retains real routes as limited instead of discarding them',as
     });
     assert.equal(s.phase,'limited');assert.equal(s.candidates.length,1);assert.equal(projectJourneyResult(s).recommendedId,null);
 });
-test('speculative reroute 503 retains base results',async()=>{
-    const s=state();s.pendingReplans=[[[127,37],[127.001,37.001]]];
+test('speculative reroute 503 preserves remaining routes and pending waypoint attempts',async()=>{
+    const s=state();s.pendingReplans=[[[127,37],[127.001,37.001]],[[127,37],[127.002,37.002]]];
     const op=reserveJourneyOperation(s);assert.equal(op?.kind,'replan');assert.ok(op);
     await advanceJourneyState(s,op,config,new AbortController().signal,{
         streetImage:async()=>null,
         analyzeKhuImage:async()=>{throw new Error('unexpected AI request');},
         reroute:async()=>{throw Object.assign(new Error('upstream unavailable'),{status:503});},
     });
-    assert.equal(s.phase,'limited');assert.equal(s.candidates.length,1);
+    assert.equal(s.phase,'running');assert.equal(s.candidates.length,1);
+    assert.equal(reserveJourneyOperation(s)?.kind,'replan');
 });
 test('a clear result completes only after every sample has its own image finding',async()=>{
     const s=state();
@@ -86,4 +87,25 @@ test('a clear result completes only after every sample has its own image finding
         if(calls<s.candidates[0].samples.length) assert.equal(projectJourneyResult(s).recommendedId,null);
     }
     assert.equal(calls,s.candidates[0].samples.length);assert.equal(s.phase,'ready');assert.equal(projectJourneyResult(s).recommendedId,'r');
+});
+
+for(const failure of ['unknown','caution'] as const)test(`a ${failure} first route does not consume the budget needed for a clear alternative`,async()=>{
+    const s=state();
+    const coords:[number,number][]=[[127,37],[127.015,37]];
+    const first={...s.candidates[0],coords,samples:samplesFor(coords)};
+    const second={...first,id:'alternative',name:'alternative'};
+    s.candidates=[first,second];
+    assert.ok(first.samples.length+second.samples.length>48);
+    let calls=0;
+    while(s.phase==='running'){
+        const op=reserveJourneyOperation(s);if(!op)break;
+        await advanceJourneyState(s,op,config,new AbortController().signal,{
+            streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/fixture',capturedAt:Date.now(),coord:sample.coord,heading:sample.heading}}),
+            analyzeKhuImage:async()=>({model:'gemini-test',finding:{status:++calls===1?failure:'clear',reason:'test observation',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path'},checkedAt:new Date().toISOString(),usage:{input:1,output:1}}),
+            reroute:async()=>{throw Error('unexpected reroute');},
+        });
+    }
+    assert.equal(projectJourneyResult(s).recommendedId,'alternative');
+    assert.equal(calls,1+second.samples.length);
+    assert.ok(calls<=48);
 });
