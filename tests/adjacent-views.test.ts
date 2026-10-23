@@ -80,3 +80,13 @@ test('recovery uses camera metadata of the supporting view rather than unrelated
   assert.equal(item.status,support==='center'?'unknown':'clear');
  }
 });
+test('a shared capture deadline with zero views is a service outage rather than missing local coverage',async()=>{
+ const originalTimeout=AbortSignal.timeout;
+ AbortSignal.timeout=()=>originalTimeout(10);
+ try{
+  await assert.rejects(captureAdjacentViews({route,sample,limit:3,config,signal:new AbortController().signal,capture:async(_sample,_config,signal)=>{
+   await new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));
+   return null;
+  }}),error=>error instanceof Error&&'status' in error&&error.status===503);
+ }finally{AbortSignal.timeout=originalTimeout;}
+});

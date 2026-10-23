@@ -32,6 +32,7 @@ export async function captureAdjacentViews({route,sample,limit,config,signal,cap
         }
     }));
     signal.throwIfAborted();
+    if(!views.length&&deadline.aborted)throw new ImageryServiceError(503);
     if(!views.length&&outage)throw outage;
     const distinct=views.filter((view,index,all)=>all.findIndex(other=>panoramaIdentity(other.image.source)===panoramaIdentity(view.image.source))===index);
     return {views:distinct,attempts,context:distinct.map(view=>'사진 ID: '+view.id+'\n'+routeImageContext({route,sample,source:view.image.source})).join('\n')};
