@@ -1,71 +1,43 @@
-import { meters, samplesFor, type Coord, type Place, type Route } from './domain';
-import type { ServerConfig } from './server-config';
-type Keys = Pick<ServerConfig, 'tmap'>;
-const TMAP = 'https://apis.openapi.sk.com/tmap';
-export class ServiceError extends Error {
-    constructor(message: string, public status = 400) { super(message); }
+import { z } from 'zod';
+import { meters, samplesFor, type Place, type Route } from './domain.ts';
+import type { RoutingConfig } from './server-config.ts';
+import * as tmap from './tmap-providers.ts';
+export { ServiceError } from './tmap-providers.ts';
+import { ServiceError } from './tmap-providers.ts';
+const coordinate = z.tuple([z.coerce.number().min(124).max(132), z.coerce.number().min(33).max(40)]);
+const location = z.object({ x:z.coerce.number().min(124).max(132), y:z.coerce.number().min(33).max(40) });
+const places = z.object({documents:z.array(location.extend({id:z.string(),place_name:z.string(),address_name:z.string(),road_address_name:z.string().optional()}))});
+const addresses = z.object({documents:z.array(location.extend({address_name:z.string(),road_address:z.object({address_name:z.string()}).nullable().optional()}))});
+const step = z.object({properties:location.extend({guidance:z.string(),distance:z.number().nonnegative(),time:z.number().nonnegative()}),path:z.object({points:z.array(coordinate).min(1)})});
+const walking = z.discriminatedUnion('status',[
+    z.object({status:z.literal('OK'),route:z.object({properties:z.object({totalDistance:z.number().positive(),totalTime:z.number().positive()}),legs:z.array(z.object({steps:z.array(step).min(1)})).min(1)})}),
+    z.object({status:z.enum(['SAME_POINT','START_LINK_NOT_FOUND','END_LINK_NOT_FOUND','TOO_MANY_SEARCH_LINK','TOO_FAR_AWAY','ROUTE_RESULT_NOT_FOUND'])}),
+]);
+async function kakao(path:string, params:URLSearchParams, restKey:string, signal?:AbortSignal):Promise<unknown> {
+    const response=await fetch('https://dapi.kakao.com/v2/'+path+'?'+params,{headers:{Authorization:'KakaoAK '+restKey},cache:'no-store',redirect:'manual',signal:signal?AbortSignal.any([signal,AbortSignal.timeout(15000)]):AbortSignal.timeout(15000)});
+    if(!response.ok) throw new ServiceError('지도 서비스를 잠시 이용할 수 없습니다.',503);
+    return response.json();
 }
-function required(value: string, name: string) { if (!value?.trim())
-    throw new ServiceError('길찾기 서비스를 잠시 이용할 수 없습니다.', 503); return value.trim(); }
-async function json(url: string, init: RequestInit = {}, service = '외부 서비스'): Promise<any> {
-    const r = await fetch(url, { ...init, redirect: 'error', signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000) });
-    if (!r.ok)
-        throw new ServiceError(`${service} 요청 실패 (${r.status}). 키의 권한·사용량·서비스 활성화 상태를 확인해 주세요.`, 502);
-    try {
-        return await r.json();
-    }
-    catch {
-        throw new ServiceError(service + '에서 올바른 응답을 받지 못했습니다.', 502);
-    }
+export async function search(query:string, config:RoutingConfig, signal?:AbortSignal):Promise<Place[]> {
+    if(config.kind==='tmap') return tmap.search(query,{tmap:config.apiKey},signal);
+    const result=places.parse(await kakao('local/search/keyword.json',new URLSearchParams({query,size:'8'}),config.restKey,signal));
+    return result.documents.map(p=>({id:p.id,name:p.place_name,address:p.road_address_name||p.address_name,coord:[p.x,p.y]}));
 }
-export async function search(query: string, keys: Keys, signal?: AbortSignal): Promise<Place[]> {
-    const key = required(keys.tmap, 'TMAP');
-    const p = new URLSearchParams({ version: '1', searchKeyword: query, resCoordType: 'WGS84GEO', count: '8' });
-    const d = await json(TMAP + '/pois?' + p, { headers: { appKey: key }, signal }, 'TMAP 장소 검색');
-    return (d.searchPoiInfo?.pois?.poi || []).map((x: any) => ({ id: String(x.id), name: x.name, address: [x.upperAddrName, x.middleAddrName, x.lowerAddrName, x.detailAddrName].filter(Boolean).join(' '), coord: [Number(x.frontLon || x.noorLon), Number(x.frontLat || x.noorLat)] })).filter((x: Place) => x.coord.every(Number.isFinite) && x.coord[0] > 120 && x.coord[1] > 30);
+export async function geocode(query:string, config:RoutingConfig, signal?:AbortSignal):Promise<Place[]> {
+    if(config.kind==='tmap') return tmap.geocode(query,{tmap:config.apiKey},signal);
+    const result=addresses.parse(await kakao('local/search/address.json',new URLSearchParams({query,size:'8'}),config.restKey,signal));
+    return result.documents.map((p,i)=>({id:'address-'+i,name:p.address_name,address:p.road_address?.address_name||p.address_name,coord:[p.x,p.y]}));
 }
-export async function geocode(query: string, keys: Keys, signal?: AbortSignal): Promise<Place[]> {
-    const key = required(keys.tmap, 'TMAP');
-    const p = new URLSearchParams({ version: '1', fullAddr: query, coordType: 'WGS84GEO', addressFlag: 'F00', format: 'json' });
-    const d = await json(TMAP + '/geo/fullAddrGeo?' + p, { headers: { appKey: key }, signal }, 'TMAP 주소 검색');
-    const raw = d.coordinateInfo?.coordinate || [];
-    return (Array.isArray(raw) ? raw : [raw]).map((x: any, i: number) => ({ id: 'addr' + i, name: query, address: [x.city_do, x.gu_gun, x.eup_myun, x.legalDong, x.bunji].filter(Boolean).join(' ') || query, coord: [Number(x.newLon || x.lon), Number(x.newLat || x.lat)] as Coord })).filter((x: Place) => x.coord.every(Number.isFinite) && x.coord[0] > 120 && x.coord[1] > 30);
-}
-export async function routes(start: Place, end: Place, keys: Keys, signal?: AbortSignal) {
-    const key = required(keys.tmap, 'TMAP');
-    if (meters(start.coord, end.coord) > 15000)
-        throw new ServiceError('MVP는 직선거리 15km 이내에서 이용해 주세요.');
-    const options = [['30', '계단 제외'], ['4', '대로 우선'], ['10', '최단 경로']];
-    const result: Route[] = [];
-    const errors: string[] = [];
-    for (const [option, name] of options) {
-        if (signal?.aborted)
-            break;
-        try {
-            const d = await json(TMAP + '/routes/pedestrian?version=1', { method: 'POST', signal, headers: { appKey: key, 'Content-Type': 'application/json' }, body: JSON.stringify({ startX: start.coord[0], startY: start.coord[1], endX: end.coord[0], endY: end.coord[1], startName: encodeURIComponent(start.name), endName: encodeURIComponent(end.name), reqCoordType: 'WGS84GEO', resCoordType: 'WGS84GEO', searchOption: option }) }, 'TMAP ' + name);
-            const features = d.features;
-            if (!Array.isArray(features))
-                throw new ServiceError('경로 응답에 지리정보가 없습니다.', 502);
-            const coords: Coord[] = features.filter((f: any) => f.geometry?.type === 'LineString').flatMap((f: any) => f.geometry.coordinates).filter((c: Coord, i: number, a: Coord[]) => i === 0 || meters(c, a[i - 1]) > 0.1);
-            if (coords.length < 2)
-                throw new ServiceError('표시할 수 있는 경로가 없습니다.', 502);
-            const signature = JSON.stringify(coords.map(c => c.map(n => n.toFixed(5))));
-            const same = result.find(r => JSON.stringify(r.coords.map(c => c.map(n => n.toFixed(5)))) === signature);
-            if (same) {
-                same.options.push(name);
-                continue;
-            }
-            const steps = features.filter((f: any) => f.geometry?.type === 'Point' && f.properties?.description).map((f: any) => ({ text: String(f.properties.description), coord: f.geometry.coordinates as Coord }));
-            const distance = Number(features[0]?.properties?.totalDistance) || coords.slice(1).reduce((v, c, i) => v + meters(coords[i], c), 0);
-            if (distance > 20000)
-                throw new ServiceError('보행 경로가 MVP 분석 한도인 20km를 초과했습니다.');
-            result.push({ id: 'route' + option, name, options: [name], coords, distance, seconds: Number(features[0]?.properties?.totalTime) || 0, steps, samples: samplesFor(coords, steps.filter((s: any) => /횡단|계단|육교|지하|진입/.test(s.text)).map((s: any) => s.coord)), fetchedAt: new Date().toISOString() });
-        }
-        catch (e) {
-            errors.push(e instanceof Error ? e.message : '경로 조회 실패');
-        }
-    }
-    if (!result.length)
-        throw new ServiceError('길찾기 서비스를 잠시 이용할 수 없습니다.', 503);
-    return { routes: result, warnings: errors };
+export async function routes(start:Place,end:Place,config:RoutingConfig,signal?:AbortSignal):Promise<{routes:Route[];warnings:string[]}> {
+    if(config.kind==='tmap') return tmap.routes(start,end,{tmap:config.apiKey},signal);
+    if(meters(start.coord,end.coord)>15000) throw new ServiceError('직선거리 15km 이내에서 이용해 주세요.');
+    const params=new URLSearchParams({start_x:String(start.coord[0]),start_y:String(start.coord[1]),end_x:String(end.coord[0]),end_y:String(end.coord[1]),input_coord:'WGS84',output_coord:'WGS84',s_name:start.name,e_name:end.name});
+    const result=walking.parse(await kakao('routing/walk',params,config.restKey,signal));
+    if(result.status!=='OK') throw new ServiceError('이 위치를 연결하는 도보 경로를 찾지 못했습니다. 출발지와 도착지를 조정해 주세요.');
+    const rawSteps=result.route.legs.flatMap(leg=>leg.steps);
+    const coords=rawSteps.flatMap(s=>s.path.points).filter((c,i,a)=>i===0||meters(a[i-1],c)>.1);
+    if(coords.length<2||result.route.properties.totalDistance>20000) throw new ServiceError('분석할 수 있는 도보 경로 범위를 벗어났습니다.');
+    const steps=rawSteps.map(s=>({text:s.properties.guidance,coord:coordinate.parse([s.properties.x,s.properties.y])}));
+    const route:Route={id:'kakao-walk',name:'도보 경로',options:['도보 경로'],coords,distance:result.route.properties.totalDistance,seconds:result.route.properties.totalTime,steps,samples:samplesFor(coords,steps.filter(s=>/횡단|계단|육교|지하|진입/.test(s.text)).map(s=>s.coord)),fetchedAt:new Date().toISOString()};
+    return {routes:[route],warnings:[]};
 }

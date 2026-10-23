@@ -14,7 +14,7 @@ const captures = z.object({ data: z.array(capture), paging: z.object({ next: z.s
 export class ImageryServiceError extends Error {
     constructor(public status:number){super('Imagery service unavailable');}
 }
-async function checkedFetch(url: string, init: RequestInit, signal: AbortSignal) { const response = await fetch(url, { ...init, redirect: 'error', cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(12000)]) }); if (!response.ok)
+async function checkedFetch(url: string, init: RequestInit, signal: AbortSignal) { const response = await fetch(url, { ...init, redirect: 'manual', cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(12000)]) }); if (!response.ok)
     throw new ImageryServiceError(response.status); return response; }
 async function boundedBytes(response: Response, max: number) { const reader = response.body?.getReader(); if (!reader)
     throw new Error('Empty image'); const chunks: Uint8Array[] = []; let size = 0; while (true) {

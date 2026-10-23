@@ -35,9 +35,18 @@ test('consumer requests reject keys, arbitrary models and manual analysis action
     assert.equal(requestSchema.safeParse({ action: 'inspect', sample: {} }).success, false);
     assert.equal(requestSchema.safeParse({ action: 'search', query: '경희대', keys: {} }).success, false);
 });
-test('request scoped secrets stay isolated and missing imagery is not configured', async () => {
+test('request scoped secrets stay isolated and missing imagery cannot produce an analysis source', async () => {
     const config = { TMAP_API_KEY: 'tmap', CHATKHU_API_KEY: 'private', MAPILLARY_TOKEN: 'imagery' };
     assert.throws(() => runWithServerEnv({}, serverConfig));
-    assert.throws(() => runWithServerEnv({ TMAP_API_KEY: 'a', CHATKHU_API_KEY: 'b' }, serverConfig));
+    assert.equal(runWithServerEnv({ TMAP_API_KEY: 'a', CHATKHU_API_KEY: 'b' }, serverConfig).mapillary, '');
     await Promise.all(['one', 'two'].map(key => runWithServerEnv({ ...config, CHATKHU_API_KEY: key }, async () => { await Promise.resolve(); assert.equal(serverConfig().ai, key); })));
+});
+
+test('Kakao routing is selected only at configuration time and public map config excludes private keys', async () => {
+    const {routingConfig,publicMapConfig}=await import('../lib/server-config.ts');
+    runWithServerEnv({KAKAO_REST_API_KEY:'private-rest',KAKAO_JAVASCRIPT_KEY:'a'.repeat(32),CHATKHU_API_KEY:'private-ai',TMAP_API_KEY:'other'},()=>{
+        assert.deepEqual(routingConfig(),{kind:'kakao',restKey:'private-rest'});
+        assert.deepEqual(publicMapConfig(),{javascriptKey:'a'.repeat(32)});
+    });
+    assert.deepEqual(runWithServerEnv({TMAP_API_KEY:'fallback'},routingConfig),{kind:'tmap',apiKey:'fallback'});
 });

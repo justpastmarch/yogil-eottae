@@ -5,7 +5,8 @@ import { streetImage, ImageryServiceError } from './street-imagery';
 import { serverConfig } from './server-config';
 export async function findJourney(start: Place, end: Place, profile: string, signal: AbortSignal): Promise<JourneyResult> {
     const config = serverConfig();
-    const candidates = (await routes(start, end, config, signal)).routes;
+    const candidates = (await routes(start, end, config.routing, signal)).routes;
+    if (!config.mapillary && !config.rendererUrl) return {routes:candidates,evidence:{},recommendedId:null,status:'limited'};
     signal.throwIfAborted();
     const evidence: Record<string, Evidence> = {};
     const blockedRoutes = new Set<string>();

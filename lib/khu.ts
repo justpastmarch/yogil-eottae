@@ -42,7 +42,7 @@ export class KhuError extends Error {
 }
 async function request(path: string, apiKey: string, body?: unknown, signal?: AbortSignal) {
     const response = await fetch(GATEWAY + path, {
-        method: body === undefined ? 'GET' : 'POST', redirect: 'error', cache: 'no-store', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45000)]) : AbortSignal.timeout(45000),
+        method: body === undefined ? 'GET' : 'POST', redirect: 'manual', cache: 'no-store', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45000)]) : AbortSignal.timeout(45000),
         headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
