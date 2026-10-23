@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { search, geocode } from '@/lib/providers';
-import { findJourney } from '@/lib/journey';
+import { startJourney, advanceJourney, cancelJourney } from '@/lib/journey-jobs';
 import { routingConfig } from '@/lib/server-config';
 import { requestSchema } from '@/lib/requests';
 export const dynamic = 'force-dynamic';
@@ -22,12 +22,18 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: '입력값을 확인해 주세요.' }, { status: 400 });
         }
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(85000)]);
-        const data = body.action === 'search' ? { places: await (body.address ? geocode : search)(body.query, routingConfig(), signal) } : await findJourney(body.start, body.end, body.profile, signal);
+        if (body.action === 'search') return NextResponse.json({places: await (body.address ? geocode : search)(body.query, routingConfig(), signal)}, {headers:{'Cache-Control':'no-store'}});
+        const userId = request.headers.get('oai-authenticated-user-id');
+        const local = import.meta.env.DEV && ['localhost','127.0.0.1'].includes(new URL(request.url).hostname);
+        const ownerId = userId || (local ? 'local-preview-owner' : null);
+        if (!ownerId) return NextResponse.json({error:'로그인 후 길찾기를 이용해 주세요.'},{status:401,headers:{'Cache-Control':'no-store'}});
+        const data = body.action === 'journey' ? await startJourney(body, ownerId, signal)
+            : body.action === 'advance' ? await advanceJourney(body.jobId, ownerId, signal)
+            : await cancelJourney(body.jobId, ownerId);
         return NextResponse.json(data, { headers: { 'Cache-Control': 'no-store' } });
     }
     catch (error) {
         console.warn('Journey request failed', error instanceof Error ? error.name : 'UnknownError', error && typeof error === 'object' && 'status' in error ? error.status : null);
-        if (import.meta.env.DEV && error instanceof Error) console.warn(error.message.replace(/[A-Za-z0-9_-]{24,}/g,'[redacted]'));
         return NextResponse.json({ error: '길찾기 서비스를 잠시 이용할 수 없습니다. 잠시 후 다시 시도해 주세요.' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
 }
