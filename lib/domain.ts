@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 export type Coord = [
     number,
     number
@@ -8,13 +10,15 @@ export type Place = {
     address: string;
     coord: Coord;
 };
-export type Finding = {
-    status: 'clear' | 'caution' | 'blocked' | 'unknown';
-    reason: string;
-    evidence: string[];
-    limitations: string[];
-    pathVisible: boolean;
-};
+export const findingSchema = z.object({
+    status: z.enum(['clear', 'caution', 'blocked', 'unknown']),
+    reason: z.string(),
+    evidence: z.array(z.string()),
+    limitations: z.array(z.string()),
+    pathVisible: z.boolean(),
+    routeMatch: z.enum(['same-path', 'uncertain', 'different-path']).default('uncertain'),
+});
+export type Finding = z.infer<typeof findingSchema>;
 export type Sample = {
     id: string;
     coord: Coord;
@@ -35,7 +39,17 @@ export type Route = {
     }[];
     samples: Sample[];
     fetchedAt: string;
+    detourReason?: string;
 };
+export type BlockedPassage = {
+    id: string;
+    routeId: string;
+    sampleId: string;
+    fromAlong: number;
+    toAlong: number;
+    coords: Coord[];
+};
+export type RouteAssessments = Record<string, { blockedPassageIds: string[] }>;
 export type Evidence = {
     sampleId: string;
     status: Finding['status'];
@@ -43,7 +57,8 @@ export type Evidence = {
     finding?: Finding;
     source?: {
         url: string;
-        capturedAt: number;
+        capturedAt: number | null;
+        capturedMonth?: string;
         coord: Coord;
         distance: number;
     };
@@ -52,11 +67,15 @@ export type Evidence = {
 export type JourneyResult = {
     routes: Route[];
     evidence: Record<string, Evidence>;
+    assessments: RouteAssessments;
     recommendedId: string | null;
     status: 'ready' | 'limited';
 };
-export function recommendedRoute(routes: Route[], evidence: Record<string, Evidence>): string | null {
-    return rankRoutes(routes, evidence).find(route => { const s = summary(route, evidence); return s.total > 0 && s.checked === s.total && s.unknown === 0 && s.blocked === 0; })?.id ?? null;
+export function recommendedRoute(routes: Route[], evidence: Record<string, Evidence>, assessments?: RouteAssessments): string | null {
+    return rankRoutes(routes, evidence).find(route => {
+        const s = summary(route, evidence);
+        return s.total > 0 && s.clear === s.total && (!assessments || assessments[route.id]?.blockedPassageIds.length === 0);
+    })?.id ?? null;
 }
 export function inspectionOrder(routes: Route[]) {
     return routes.flatMap(route => [...route.samples]
@@ -65,7 +84,26 @@ export function inspectionOrder(routes: Route[]) {
 }
 export function meters(a: Coord, b: Coord) { const r = Math.PI / 180, dp = (b[1] - a[1]) * r, dl = (b[0] - a[0]) * r; const v = Math.sin(dp / 2) ** 2 + Math.cos(a[1] * r) * Math.cos(b[1] * r) * Math.sin(dl / 2) ** 2; return 6371000 * 2 * Math.atan2(Math.sqrt(v), Math.sqrt(Math.max(0, 1 - v))); }
 export function bearing(a: Coord, b: Coord) { const r = Math.PI / 180; return (Math.atan2(Math.sin((b[0] - a[0]) * r) * Math.cos(b[1] * r), Math.cos(a[1] * r) * Math.sin(b[1] * r) - Math.sin(a[1] * r) * Math.cos(b[1] * r) * Math.cos((b[0] - a[0]) * r)) * 180 / Math.PI + 360) % 360; }
+export type RouteProjection = { coord: Coord; along: number; heading: number; distance: number; segmentIndex: number };
+export function projectOnRoute(coords: Coord[], point: Coord): RouteProjection | null {
+    let nearest: RouteProjection | null = null;
+    let total = 0;
+    for (let i = 1; i < coords.length; i++) {
+        const a = coords[i - 1], b = coords[i], length = meters(a, b);
+        if (!length) continue;
+        const scale = Math.cos((a[1] + b[1]) / 2 * Math.PI / 180);
+        const dx = (b[0] - a[0]) * scale, dy = b[1] - a[1];
+        const t = Math.max(0, Math.min(1, (((point[0] - a[0]) * scale * dx) + (point[1] - a[1]) * dy) / (dx * dx + dy * dy)));
+        const coord: Coord = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+        const distance = meters(point, coord);
+        if (!nearest || distance < nearest.distance)
+            nearest = { coord, along: total + length * t, heading: bearing(a, b), distance, segmentIndex: i - 1 };
+        total += length;
+    }
+    return nearest;
+}
 export function samplesFor(coords: Coord[], critical: Coord[] = [], spacing = 50): Sample[] {
+    if (!Number.isFinite(spacing) || spacing <= 0) throw new RangeError('Sample spacing must be positive.');
     const out: Sample[] = [];
     let total = 0, next = 0;
     for (let i = 1; i < coords.length; i++) {
@@ -79,28 +117,25 @@ export function samplesFor(coords: Coord[], critical: Coord[] = [], spacing = 50
         }
         total += len;
     }
-    if (coords.length > 1)
-        out.push({ id: 'end', coord: coords.at(-1)!, heading: bearing(coords.at(-2)!, coords.at(-1)!), along: total, critical: true });
+    const end = coords.at(-1), beforeEnd = coords.at(-2), lastSample = out.at(-1);
+    if (end && beforeEnd && total > 0) {
+        if (lastSample && total - lastSample.along < 0.1) lastSample.critical = true;
+        else out.push({ id: 'end', coord: end, heading: bearing(beforeEnd, end), along: total, critical: true });
+    }
     for (const p of critical) {
-        let nearest = out[0];
-        for (const s of out)
-            if (!nearest || meters(s.coord, p) < meters(nearest.coord, p))
-                nearest = s;
-        if (nearest && meters(nearest.coord, p) < 15)
-            nearest.critical = true;
-        else if (nearest)
-            out.push({ id: 'c' + out.length, coord: p, heading: nearest.heading, along: nearest.along, critical: true });
+        const projected = projectOnRoute(coords, p);
+        if (!projected || projected.distance > 20) continue;
+        const existing = out.find(s => Math.abs(s.along - projected.along) < 1);
+        if (existing) Object.assign(existing, { coord: projected.coord, along: projected.along, heading: projected.heading, critical: true });
+        else out.push({ id: 'c' + out.length, coord: projected.coord, heading: projected.heading, along: projected.along, critical: true });
     }
     return out.sort((a, b) => a.along - b.along).map((s, i) => ({ ...s, id: 's' + i }));
 }
 export function summary(route: Route, evidence: Record<string, Evidence>) { const items = route.samples.map(s => evidence[route.id + ':' + s.id]); const count = (status: string) => items.filter(e => e?.status === status).length; return { total: items.length, checked: items.filter(Boolean).length, clear: count('clear'), blocked: count('blocked'), caution: count('caution'), unknown: items.filter(e => !e || e.status === 'unknown').length }; }
 export function rankRoutes(routes: Route[], evidence: Record<string, Evidence>) { return [...routes].sort((a, b) => { const x = summary(a, evidence), y = summary(b, evidence); return x.blocked - y.blocked || (x.unknown / x.total - y.unknown / y.total) || x.caution - y.caution || a.distance - b.distance; }); }
 export function validateFinding(value: unknown): Finding {
-    if (!value || typeof value !== 'object')
-        throw new Error('AI 응답 형식을 확인할 수 없습니다.');
-    const v = value as Record<string, unknown>;
-    if (!['clear', 'caution', 'blocked', 'unknown'].includes(String(v.status)) || typeof v.reason !== 'string' || typeof v.pathVisible !== 'boolean' || !Array.isArray(v.evidence) || !Array.isArray(v.limitations) || ![...v.evidence, ...v.limitations].every(x => typeof x === 'string'))
-        throw new Error('AI 응답 형식을 확인할 수 없습니다.');
-    const f = v as Finding;
-    return { ...f, status: !f.pathVisible ? 'unknown' : f.status, reason: f.reason.slice(0, 1000), evidence: f.evidence.slice(0, 8), limitations: f.limitations.slice(0, 8) };
+    const parsed = findingSchema.safeParse(value);
+    if (!parsed.success) throw new Error('AI 응답 형식을 확인할 수 없습니다.');
+    const f = parsed.data;
+    return { ...f, status: !f.pathVisible || f.routeMatch !== 'same-path' ? 'unknown' : f.status, reason: f.reason.slice(0, 1000), evidence: f.evidence.slice(0, 8), limitations: f.limitations.slice(0, 8) };
 }

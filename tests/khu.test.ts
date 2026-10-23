@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {imageInput,parseKhuGeminiResponse,parseKhuClaudeResponse} from '../lib/khu.ts';
 
-const finding={status:'clear',reason:'보행 공간 관찰',evidence:['보도'],limitations:['사진 밖 연결'],pathVisible:true};
+const finding={status:'clear',reason:'보행 공간 관찰',evidence:['보도'],limitations:['사진 밖 연결'],pathVisible:true,routeMatch:'same-path'};
 test('interrupted Gemini response is rejected even when JSON looks complete',()=>{
   assert.throws(()=>parseKhuGeminiResponse({candidates:[{finishReason:'MAX_TOKENS',content:{parts:[{text:JSON.stringify(finding)}]}}]}));
 });
