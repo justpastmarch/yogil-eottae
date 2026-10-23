@@ -22,3 +22,14 @@ test('image type must agree with actual bytes and malformed base64 is rejected',
   assert.equal(imageInput.safeParse({mime:'image/png',data:'invalid!'}).success,false);
   assert.equal(imageInput.safeParse({mime:'image/png',data:'iVBORw0KGgo='}).success,true);
 });
+
+test('native AI parsers retain structured observations without a numeric grade',()=>{
+  const features={stairs:{state:'present',reason:'통로에 계단이 보임'},incline:{state:'not-observed',reason:'사진에 경사가 보이지 않음'}};
+  const text=JSON.stringify({...finding,status:'blocked',features,grade:12});
+  const gemini=parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text}]}}]});
+  const claude=parseKhuClaudeResponse({stop_reason:'end_turn',content:[{type:'text',text}],usage:{input_tokens:1,output_tokens:1}});
+  for(const result of [gemini,claude]){
+    assert.deepEqual(result.finding.features,features);
+    assert.equal('grade' in result.finding,false);
+  }
+});

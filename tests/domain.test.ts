@@ -50,3 +50,27 @@ test('caution and shared blocked passages prevent recommendation despite complet
     evidence['r:s0'].status='caution';
     assert.equal(recommendedRoute([route],evidence),null);
 });
+
+test('structured features belong only to an observable same path',()=>{
+    const features={stairs:{state:'present',reason:'사진에 계단이 보임'},incline:{state:'not-observed',reason:'사진에 경사가 보이지 않음'}};
+    const raw={status:'blocked',reason:'observed',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path',features};
+    assert.deepEqual(validateFinding(raw).features,features);
+    for(const change of [{routeMatch:'different-path'},{routeMatch:'uncertain'},{pathVisible:false},{status:'unknown'}]){
+        const result=validateFinding({...raw,...change});
+        assert.equal(result.status,'unknown');
+        assert.equal(result.features?.stairs.state,'unobservable');
+        assert.equal(result.features?.incline.state,'unobservable');
+    }
+    assert.throws(()=>validateFinding({...raw,features:{...features,stairs:{state:'present',reason:'x'.repeat(1001)}}}));
+});
+test('old findings remain readable without inventing structured observations',()=>{
+    const result=validateFinding({status:'clear',reason:'계단 없음, 경사 없음',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path'});
+    assert.equal(result.features,undefined);
+});
+test('reserved evidence does not count as checked or clear coverage',()=>{
+    const evidence:Record<string,Evidence>=Object.fromEntries(route.samples.map(sample=>['r:'+sample.id,{sampleId:sample.id,stage:'reserved',status:'clear',reason:'pending',checkedAt:''}]));
+    assert.equal(summary(route,evidence).checked,0);
+    assert.equal(summary(route,evidence).clear,0);
+    assert.equal(summary(route,evidence).unknown,route.samples.length);
+    assert.equal(recommendedRoute([route],evidence),null);
+});

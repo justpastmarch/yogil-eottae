@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {Miniflare} from 'miniflare';
 import {JourneyJobStore,JourneyJobError} from '../lib/journey-jobs.ts';
-import {reserveJourneyOperation,advanceJourneyState,projectJourneyResult,type JourneyState} from '../lib/journey.ts';
-import {samplesFor,type Route} from '../lib/domain.ts';
+import {reserveJourneyOperation,advanceJourneyState,projectJourneyResult,journeyStateSchema,type JourneyState} from '../lib/journey.ts';
+import {samplesFor,summary,type Route} from '../lib/domain.ts';
 import {ImageryServiceError} from '../lib/street-imagery.ts';
 import type {ServerConfig} from '../lib/server-config.ts';
 const config:ServerConfig={routing:{kind:'kakao',restKey:'test'},ai:'test',model:'gemini-test',mapillary:'',rendererToken:'test'};
@@ -31,15 +31,34 @@ test('real D1 lease, owner isolation, expiration and cancel prevent stale commit
         const reserved=await store.write('job','owner',lease,s,false,1002);
         assert.ok(reserved);
         assert.equal(JSON.parse((await store.read('job','owner',1003)).state).lookups,1);
+        assert.equal(summary(s.candidates[0],s.evidence).checked,0);
         await store.cancel('job','owner',1004);
         assert.equal(await store.write('job','owner',reserved,s,true,1005),null);
-        assert.equal((await store.read('job','owner',1005)).phase,'canceled');
+        const canceled=await store.read('job','owner',1005);
+        assert.equal(canceled.phase,'canceled');
+        assert.equal(summary(s.candidates[0],JSON.parse(canceled.state).evidence).checked,0);
+        assert.equal(projectJourneyResult({...s,phase:'canceled'}).recommendedId,null);
         await assert.rejects(store.read('job','owner',1000+30*60_000));
         await store.insert('recovery','owner',state(),1000);
+        const recovering=state();
         const stale=await store.acquire('recovery','owner','old',1001);
         assert.ok(stale);
+        assert.ok(reserveJourneyOperation(recovering));
+        const staleReserved=await store.write('recovery','owner',stale,recovering,false,1002);
+        assert.ok(staleReserved);
         const replacement=await store.acquire('recovery','owner','new',91_002);
         assert.ok(replacement);
+        const recovered=JSON.parse(replacement.state);
+        const attempted=Object.values(journeyStateSchema.parse(recovered).evidence)[0];
+        assert.equal(attempted.stage,'processed');
+        assert.equal(attempted.status,'unknown');
+        assert.match(attempted.reason,/중단/);
+        assert.equal(attempted.finding,undefined);
+        assert.equal(summary(recovering.candidates[0],recovered.evidence).checked,1);
+        assert.equal(reserveJourneyOperation(recovered),null);
+        assert.equal(recovered.lookups,1);
+        assert.equal(recovered.analyses,1);
+        assert.equal(projectJourneyResult(recovered).recommendedId,null);
         assert.equal(await store.write('recovery','owner',stale,state(),true,91_003),null);
     }finally{await mf.dispose();}
 });
@@ -49,6 +68,8 @@ test('interrupted capture reservation stays unknown and cannot recommend a route
     assert.equal(first?.kind,'capture');
     assert.equal(s.lookups,1);
     assert.equal(s.analyses,1);
+    assert.equal(Object.values(s.evidence)[0].stage,'reserved');
+    assert.equal(summary(s.candidates[0],s.evidence).checked,0);
     const second=reserveJourneyOperation(s);
     assert.equal(second,null);
     assert.equal(s.phase,'limited');
@@ -61,6 +82,8 @@ test('renderer 429 retains real routes as limited instead of discarding them',as
         analyzeKhuImage:async()=>{throw new Error('unexpected AI request');},
         reroute:async()=>{throw new Error('unexpected reroute');},
     });
+    assert.equal(Object.values(s.evidence)[0].stage,'processed');
+    assert.equal(Object.values(s.evidence)[0].finding,undefined);
     assert.equal(s.phase,'limited');assert.equal(s.candidates.length,1);assert.equal(projectJourneyResult(s).recommendedId,null);
 });
 test('speculative reroute 503 preserves remaining routes and pending waypoint attempts',async()=>{
@@ -108,4 +131,46 @@ for(const failure of ['unknown','caution'] as const)test(`a ${failure} first rou
     assert.equal(projectJourneyResult(s).recommendedId,'alternative');
     assert.equal(calls,1+second.samples.length);
     assert.ok(calls<=48);
+});
+
+test('native parsed observations survive persisted journey schema',async()=>{
+    const {parseKhuGeminiResponse}=await import('../lib/khu.ts');
+    const {journeyStateSchema}=await import('../lib/journey.ts');
+    const s=state();const op=reserveJourneyOperation(s);assert.ok(op);
+    const features={stairs:{state:'not-observed',reason:'사진에 계단이 보이지 않음'},incline:{state:'present',reason:'동일 통로에 경사가 보임'}};
+    const parsed=parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({status:'caution',reason:'경사 관찰',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path',features})}]}}]});
+    await advanceJourneyState(s,op,config,new AbortController().signal,{
+        streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/fixture',capturedAt:null,coord:sample.coord,heading:sample.heading}}),
+        analyzeKhuImage:async()=>({...parsed,model:'gemini-test',checkedAt:new Date().toISOString()}),
+        reroute:async()=>{throw Error('unexpected reroute');},
+    });
+    const persisted=journeyStateSchema.parse(JSON.parse(JSON.stringify(s)));
+    assert.deepEqual(Object.values(persisted.evidence)[0].finding?.features,features);
+    assert.equal(Object.values(persisted.evidence)[0].stage,'processed');
+    const legacy=state();legacy.evidence['r:s0']={sampleId:'s0',status:'clear',reason:'legacy',checkedAt:''};
+    assert.equal(journeyStateSchema.parse(legacy).evidence['r:s0'].stage,undefined);
+});
+
+test('missing images and failed capture attempts finish unknown without invented observations',async()=>{
+    for(const failure of ['missing','transient','auth','aborted']){
+        const s=state();const op=reserveJourneyOperation(s);assert.ok(op);
+        const controller=new AbortController();
+        const advance=advanceJourneyState(s,op,config,controller.signal,{
+            streetImage:async()=>{
+                if(failure==='missing') return null;
+                if(failure==='aborted') controller.abort();
+                throw new ImageryServiceError(failure==='auth'?401:503);
+            },
+            analyzeKhuImage:async()=>{throw Error('unexpected AI call');},
+            reroute:async()=>{throw Error('unexpected reroute');},
+        });
+        if(failure==='auth'||failure==='aborted') await assert.rejects(advance);
+        else await advance;
+        const evidence=Object.values(s.evidence)[0];
+        assert.equal(evidence.stage,'processed');
+        assert.equal(evidence.status,'unknown');
+        assert.equal(evidence.finding,undefined);
+        assert.equal(evidence.source,undefined);
+        assert.equal(projectJourneyResult(s).recommendedId,null);
+    }
 });

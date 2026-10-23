@@ -50,7 +50,7 @@ export function reserveJourneyOperation(state:JourneyState):JourneyOperation|nul
         if(!sample) continue;
         state.lookups++;
         state.analyses++;
-        state.evidence[route.id+':'+sample.id]={sampleId:sample.id,status:'unknown',reason:'이 구간의 통행 상태를 아직 판정하지 못했습니다.',checkedAt:new Date().toISOString()};
+        state.evidence[route.id+':'+sample.id]={sampleId:sample.id,stage:'reserved',status:'unknown',reason:'이 구간의 통행 상태를 아직 판정하지 못했습니다.',checkedAt:new Date().toISOString()};
         return {kind:'capture',route,sample};
     }
     state.phase=projectJourneyResult(state).recommendedId?'ready':'limited';
@@ -79,18 +79,18 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
     try{
         const image=await deps.streetImage(sample,config,signal);
         if(!image){
-            state.evidence[key]={sampleId:sample.id,status:'unknown',reason:'이 구간의 이동 환경 정보가 충분하지 않습니다.',checkedAt:new Date().toISOString()};
+            state.evidence[key]={sampleId:sample.id,stage:'processed',status:'unknown',reason:'이 구간의 이동 환경 정보가 충분하지 않습니다.',checkedAt:new Date().toISOString()};
             return;
         }
         const step=route.steps.reduce<typeof route.steps[number]|undefined>((nearest,s)=>!nearest||meters(s.coord,sample.coord)<meters(nearest.coord,sample.coord)?s:nearest,undefined);
         const result=await deps.analyzeKhuImage({apiKey:config.ai,model:config.model,image:image.image,profile:state.profile,context:`진행 방향 ${Math.round(sample.heading)}도. 촬영 방향 ${Math.round(image.source.heading)}도. 촬영 위치 차이 ${Math.round(meters(sample.coord,image.source.coord))}m. 경로 좌표 ${JSON.stringify(sample.coord)}. 주변 안내: ${step?.text??'보행 이동'}. 지정한 진행 방향의 동일 보행 통로임이 사진에서 명확할 때만 same-path로 판정하라. 옆 건물 입구 계단과 현재 이동 통로를 혼동하지 마라.`,signal});
-        finding={sampleId:sample.id,status:result.finding.status,reason:result.finding.reason,finding:result.finding,source:{url:image.source.url,capturedAt:image.source.capturedAt,...(image.source.capturedMonth?{capturedMonth:image.source.capturedMonth}:{}),coord:image.source.coord,distance:Math.round(meters(sample.coord,image.source.coord))},checkedAt:result.checkedAt};
+        finding={sampleId:sample.id,stage:'processed',status:result.finding.status,reason:result.finding.reason,finding:result.finding,source:{url:image.source.url,capturedAt:image.source.capturedAt,...(image.source.capturedMonth?{capturedMonth:image.source.capturedMonth}:{}),coord:image.source.coord,distance:Math.round(meters(sample.coord,image.source.coord))},checkedAt:result.checkedAt};
         state.evidence[key]=finding;
     }catch(error){
+        state.evidence[key]={sampleId:sample.id,stage:'processed',status:'unknown',reason:'이 구간의 이동 환경 정보를 가져오지 못했습니다.',checkedAt:new Date().toISOString()};
         signal.throwIfAborted();
         if(error instanceof ImageryServiceError&&error.status===429){state.phase='limited';return;}
         if(error instanceof ImageryServiceError&&[401,403,404].includes(error.status)||error instanceof KhuError&&[401,402,403,404,429].includes(error.status)) throw error;
-        state.evidence[key]={sampleId:sample.id,status:'unknown',reason:'이 구간의 이동 환경 정보를 가져오지 못했습니다.',checkedAt:new Date().toISOString()};
         return;
     }
     if(finding.status==='blocked'&&finding.finding?.routeMatch==='same-path'){

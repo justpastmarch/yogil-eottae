@@ -10,6 +10,11 @@ export type Place = {
     address: string;
     coord: Coord;
 };
+export const featureObservationSchema = z.object({
+    state: z.enum(['present', 'not-observed', 'unobservable']),
+    reason: z.string().min(1).max(1000),
+});
+export type FeatureObservation = z.infer<typeof featureObservationSchema>;
 export const findingSchema = z.object({
     status: z.enum(['clear', 'caution', 'blocked', 'unknown']),
     reason: z.string(),
@@ -17,6 +22,7 @@ export const findingSchema = z.object({
     limitations: z.array(z.string()),
     pathVisible: z.boolean(),
     routeMatch: z.enum(['same-path', 'uncertain', 'different-path']).default('uncertain'),
+    features: z.object({ stairs: featureObservationSchema, incline: featureObservationSchema }).optional(),
 });
 export type Finding = z.infer<typeof findingSchema>;
 export type Sample = {
@@ -51,6 +57,7 @@ export type BlockedPassage = {
 };
 export type RouteAssessments = Record<string, { blockedPassageIds: string[] }>;
 export type Evidence = {
+    stage?: 'reserved' | 'processed';
     sampleId: string;
     status: Finding['status'];
     reason: string;
@@ -131,11 +138,13 @@ export function samplesFor(coords: Coord[], critical: Coord[] = [], spacing = 50
     }
     return out.sort((a, b) => a.along - b.along).map((s, i) => ({ ...s, id: 's' + i }));
 }
-export function summary(route: Route, evidence: Record<string, Evidence>) { const items = route.samples.map(s => evidence[route.id + ':' + s.id]); const count = (status: string) => items.filter(e => e?.status === status).length; return { total: items.length, checked: items.filter(Boolean).length, clear: count('clear'), blocked: count('blocked'), caution: count('caution'), unknown: items.filter(e => !e || e.status === 'unknown').length }; }
+export function summary(route: Route, evidence: Record<string, Evidence>) { const items = route.samples.map(s => evidence[route.id + ':' + s.id]).map(e => e?.stage === 'reserved' ? undefined : e); const count = (status: string) => items.filter(e => e?.status === status).length; return { total: items.length, checked: items.filter(Boolean).length, clear: count('clear'), blocked: count('blocked'), caution: count('caution'), unknown: items.filter(e => !e || e.status === 'unknown').length }; }
 export function rankRoutes(routes: Route[], evidence: Record<string, Evidence>) { return [...routes].sort((a, b) => { const x = summary(a, evidence), y = summary(b, evidence); return x.blocked - y.blocked || (x.unknown / x.total - y.unknown / y.total) || x.caution - y.caution || a.distance - b.distance; }); }
 export function validateFinding(value: unknown): Finding {
     const parsed = findingSchema.safeParse(value);
     if (!parsed.success) throw new Error('AI 응답 형식을 확인할 수 없습니다.');
     const f = parsed.data;
-    return { ...f, status: !f.pathVisible || f.routeMatch !== 'same-path' ? 'unknown' : f.status, reason: f.reason.slice(0, 1000), evidence: f.evidence.slice(0, 8), limitations: f.limitations.slice(0, 8) };
+    const status = !f.pathVisible || f.routeMatch !== 'same-path' ? 'unknown' : f.status;
+    const unobservable: FeatureObservation = { state: 'unobservable', reason: '사진에서 지정한 이동 통로의 해당 특징을 확인할 수 없습니다.' };
+    return { ...f, ...(f.features && status === 'unknown' ? { features: { stairs: unobservable, incline: unobservable } } : {}), status, reason: f.reason.slice(0, 1000), evidence: f.evidence.slice(0, 8), limitations: f.limitations.slice(0, 8) };
 }
