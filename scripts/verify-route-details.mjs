@@ -41,7 +41,7 @@ try{
  await page.getByRole('button',{name:'경로 목록으로',exact:true}).click();
  const restored=await page.evaluate(()=>document.activeElement?.getAttribute('aria-label'));assert.equal(restored,'넓은 길 상세 보기');
  await page.locator('.route-detail-button').nth(1).click();assert.equal(await page.locator('.detail-title h2').innerText(),'최단 경로 상세');
- await page.getByRole('button',{name:/전체 지점/}).click();assert.ok(await page.locator('.detail-point').count()>20);
+ await page.getByRole('button',{name:/이 경로 전체 지점/}).click();assert.ok(await page.locator('.detail-point').count()>20);
  await page.locator('.detail-locate').nth(10).click();assert.equal(await page.locator('.detail-point.focused').count(),1);
  await page.setViewportSize({width:390,height:844});await page.locator('.detail-body').evaluate(el=>el.scrollTop=0);await page.screenshot({path:path.join(reportDir,'경로상세-모바일.png')});
  assert.ok(await page.locator('.detail-body').evaluate(el=>el.scrollHeight>el.clientHeight));const mapBox=await page.locator('.map-area').boundingBox();assert.ok(mapBox&&mapBox.height>180);
