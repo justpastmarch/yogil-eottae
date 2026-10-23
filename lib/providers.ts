@@ -1,4 +1,5 @@
 import {bearing,meters,samplesFor,validateFinding,type Coord,type Evidence,type Keys,type Place,type Route,type Sample} from './domain';
+import {analyzeKhuImage,khuModel} from './khu';
 const TMAP='https://apis.openapi.sk.com/tmap';
 export class ServiceError extends Error { constructor(message:string,public status=400){super(message);} }
 function required(value:string,name:string){if(!value?.trim())throw new ServiceError(name+' 키를 연결해 주세요.',428);return value.trim();}
@@ -51,7 +52,9 @@ export async function analyze(sample:Sample,profile:string,keys:Keys,image:NonNu
  if(d.candidates?.[0]?.finishReason!=='STOP')throw new ServiceError('AI 분석이 완료되지 않았습니다. 제한 도달·차단 응답은 판정에 사용하지 않습니다.',502);
  raw=d.candidates?.[0]?.content?.parts?.filter((p:any)=>!p.thought).map((p:any)=>p.text||'').join('')||'';usage={input:d.usageMetadata?.promptTokenCount||0,output:(d.usageMetadata?.candidatesTokenCount||0)+(d.usageMetadata?.thoughtsTokenCount||0)};
  }else{
- const d=await json(approvedGateway(keys.baseUrl)+'/chat/completions',{method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:JSON.stringify({model,messages:[{role:'user',content:[{type:'text',text},{type:'image_url',image_url:{url:`data:${bytes.mime};base64,${bytes.data}`}}]}],max_tokens:1400})},'ChatKHU 이미지 분석');raw=d.choices?.[0]?.message?.content||'';usage={input:d.usage?.prompt_tokens||0,output:d.usage?.completion_tokens||0};
+ if(approvedGateway(keys.baseUrl)!=='https://factchat-cloud.mindlogic.ai/v1/gateway'||!khuModel.safeParse(model).success)throw new ServiceError('ChatKHU 공식 기본 주소와 Gemini 또는 Claude 모델을 선택해 주세요.');
+ if(bytes.mime!=='image/jpeg'&&bytes.mime!=='image/png'&&bytes.mime!=='image/webp')throw new ServiceError('지원하지 않는 사진 형식입니다.');
+ const d=await analyzeKhuImage({apiKey:key,model,image:{mime:bytes.mime,data:bytes.data},profile,context:text});raw=JSON.stringify(d.finding);usage=d.usage;
  }
  let finding;try{finding=validateFinding(JSON.parse(raw.replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,'')));}catch{throw new ServiceError('AI 응답을 판정 형식으로 검증하지 못했습니다. 통행 가능으로 처리하지 않습니다.',502);}
  const stale=!image.capturedAt||image.capturedAt>Date.now()||Date.now()-image.capturedAt>365*86400000;
