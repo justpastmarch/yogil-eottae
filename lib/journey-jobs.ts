@@ -40,6 +40,7 @@ export class JourneyJobStore{
         const state=decode(acquired);
         let interrupted=false;
         for(const evidence of Object.values(state.evidence)){
+            if(evidence.review?.state==='reserved'){evidence.review.state='complete';evidence.review.note='전후 영상 대조가 중단되어 기존 판정을 유지했습니다.';interrupted=true;}
             if(evidence.stage!=='reserved') continue;
             evidence.stage='processed';
             evidence.status='unknown';

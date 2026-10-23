@@ -5,7 +5,7 @@ type ContextInput = { route: Route; sample: Sample; source: StreetImage['source'
 const rounded = (value: number) => Math.round(value * 10) / 10;
 const relativeAngle = (heading: number, camera: number) => rounded(((heading - camera + 540) % 360) - 180);
 
-function pointAt(coords: Coord[], along: number): Coord | undefined {
+export function pointAt(coords: Coord[], along: number): Coord | undefined {
     let traversed = 0;
     for (let index = 1; index < coords.length; index++) {
         const from = coords[index - 1], to = coords[index], length = meters(from, to);

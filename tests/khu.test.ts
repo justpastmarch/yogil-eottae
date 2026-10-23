@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {imageInput,parseKhuGeminiResponse,parseKhuClaudeResponse} from '../lib/khu.ts';
 
-const finding={status:'clear',reason:'보행 공간 관찰',evidence:['보도'],limitations:['사진 밖 연결'],pathVisible:true,routeMatch:'same-path'};
+const finding={status:'clear',reason:'보행 공간 관찰',evidence:['보도'],limitations:['사진 밖 연결'],pathVisible:true,routeMatch:'same-path',visibility:'visible',reviewReason:'none'};
 test('interrupted Gemini response is rejected even when JSON looks complete',()=>{
   assert.throws(()=>parseKhuGeminiResponse({candidates:[{finishReason:'MAX_TOKENS',content:{parts:[{text:JSON.stringify(finding)}]}}]}));
 });
@@ -32,4 +32,11 @@ test('native AI parsers retain structured observations without a numeric grade',
     assert.deepEqual(result.finding.features,features);
     assert.equal('grade' in result.finding,false);
   }
+});
+
+test('new network findings require visibility and occlusion fields while legacy storage remains separate',()=>{
+ const {visibility,reviewReason,...legacy}=finding;
+ assert.throws(()=>parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(legacy)}]}}]}));
+ const result=parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({...finding,visibility:'occluded',reviewReason:'occlusion'})}]}}]});
+ assert.equal(result.finding.status,'caution');
 });

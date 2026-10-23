@@ -21,6 +21,8 @@ export const findingSchema = z.object({
     evidence: z.array(z.string()),
     limitations: z.array(z.string()),
     pathVisible: z.boolean(),
+    visibility: z.enum(['visible', 'occluded', 'unobservable']).optional(),
+    reviewReason: z.enum(['occlusion', 'corridor-uncertain', 'none']).optional(),
     routeMatch: z.enum(['same-path', 'uncertain', 'different-path']).default('uncertain'),
     features: z.object({ stairs: featureObservationSchema, incline: featureObservationSchema }).optional(),
 });
@@ -46,6 +48,7 @@ export type Route = {
     samples: Sample[];
     fetchedAt: string;
     detourReason?: string;
+    knownBarriers?: string[];
 };
 export type BlockedPassage = {
     id: string;
@@ -56,18 +59,27 @@ export type BlockedPassage = {
     coords: Coord[];
 };
 export type RouteAssessments = Record<string, { blockedPassageIds: string[] }>;
+export const evidenceSourceSchema = z.object({
+    url: z.string().url(), capturedAt: z.number().nullable(), capturedMonth: z.string().regex(/^20\d{2}-(0[1-9]|1[0-2])$/).optional(),
+    coord: z.tuple([z.number(), z.number()]), distance: z.number(), heading: z.number().optional(), panoId: z.string().optional(),
+});
+export type EvidenceSource = z.infer<typeof evidenceSourceSchema>;
 export type Evidence = {
     stage?: 'reserved' | 'processed';
     sampleId: string;
     status: Finding['status'];
     reason: string;
     finding?: Finding;
-    source?: {
-        url: string;
-        capturedAt: number | null;
-        capturedMonth?: string;
-        coord: Coord;
-        distance: number;
+    source?: EvidenceSource;
+    review?: {
+        state: 'pending' | 'reserved' | 'complete';
+        reason: 'occlusion' | 'corridor-uncertain';
+        initialFinding: Finding;
+        initialSource: EvidenceSource;
+        sources: { id: string; source: EvidenceSource }[];
+        result?: Finding;
+        supportIds: string[];
+        note: string;
     };
     checkedAt: string;
 };
@@ -146,8 +158,8 @@ export function validateFinding(value: unknown): Finding {
     const f = parsed.data;
     const observable=f.pathVisible&&f.routeMatch==='same-path';
     const observedFeature=f.features?.stairs.state==='present'||f.features?.incline.state==='present';
-    const status = !observable ? 'unknown' : f.status==='clear'&&observedFeature?'caution':f.status;
-    const reason=f.status==='clear'&&status==='caution'?'계단 또는 경사가 관찰되어 통행 가능 판정을 보류했습니다. '+f.reason:f.reason;
+    const status = !observable || f.visibility === 'unobservable' ? 'unknown' : f.status === 'clear' && (observedFeature || f.visibility === 'occluded' || f.reviewReason === 'occlusion') ? 'caution' : f.status;
+    const reason=f.status==='clear'&&status==='caution'?'관찰된 경사·계단 또는 가려진 통로가 있어 통행 가능 판정을 보류했습니다. '+f.reason:f.reason;
     const unobservable: FeatureObservation = { state: 'unobservable', reason: '사진에서 지정한 이동 통로의 해당 특징을 확인할 수 없습니다.' };
     return { ...f, ...(f.features && status === 'unknown' ? { features: { stairs: unobservable, incline: unobservable } } : {}), status, reason: reason.slice(0, 1000), evidence: f.evidence.slice(0, 8), limitations: f.limitations.slice(0, 8) };
 }

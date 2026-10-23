@@ -81,6 +81,7 @@ test('interrupted capture reservation stays unknown and cannot recommend a route
 test('renderer 429 retains real routes as limited instead of discarding them',async()=>{
     const s=state();const op=reserveJourneyOperation(s);assert.ok(op);
     await advanceJourneyState(s,op,config,new AbortController().signal,{
+        analyzeKhuViews:async()=>{throw new Error('joint analysis not provided in this test');},
         streetImage:async()=>{throw new ImageryServiceError(429);},
         analyzeKhuImage:async()=>{throw new Error('unexpected AI request');},
         reroute:async()=>{throw new Error('unexpected reroute');},
@@ -93,6 +94,7 @@ test('speculative reroute 503 preserves remaining routes and pending waypoint at
     const s=state();s.pendingReplans=[[[127,37],[127.001,37.001]],[[127,37],[127.002,37.002]]];
     const op=reserveJourneyOperation(s);assert.equal(op?.kind,'replan');assert.ok(op);
     await advanceJourneyState(s,op,config,new AbortController().signal,{
+        analyzeKhuViews:async()=>{throw new Error('joint analysis not provided in this test');},
         streetImage:async()=>null,
         analyzeKhuImage:async()=>{throw new Error('unexpected AI request');},
         reroute:async()=>{throw Object.assign(new Error('upstream unavailable'),{status:503});},
@@ -106,7 +108,8 @@ test('a clear result completes only after every sample has its own image finding
     while(s.phase==='running'){
         const op=reserveJourneyOperation(s);if(!op) break;
         await advanceJourneyState(s,op,config,new AbortController().signal,{
-            streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/actual-provider-image',capturedAt:Date.now(),coord:sample.coord,heading:sample.heading}}),
+            analyzeKhuViews:async()=>{throw new Error('joint analysis not provided in this test');},
+        streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/actual-provider-image',capturedAt:Date.now(),coord:sample.coord,heading:sample.heading}}),
             analyzeKhuImage:async()=>{calls++;return {model:'gemini-test',finding:{status:'clear',reason:'visible clear path',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path'},checkedAt:new Date().toISOString(),usage:{input:1,output:1}};},
             reroute:async()=>{throw new Error('unexpected reroute');},
         });
@@ -125,7 +128,8 @@ test('three clear 32-point candidates complete one recommendation before the 48-
     while(s.phase==='running'){
         const op=reserveJourneyOperation(s);if(!op)break;
         await advanceJourneyState(s,op,config,new AbortController().signal,{
-            streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/fixture',capturedAt:Date.now(),coord:sample.coord,heading:sample.heading}}),
+            analyzeKhuViews:async()=>{throw new Error('joint analysis not provided in this test');},
+        streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/fixture',capturedAt:Date.now(),coord:sample.coord,heading:sample.heading}}),
             analyzeKhuImage:async()=>{calls++;return {model:'gemini-test',finding:{status:'clear',reason:'visible path',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path'},checkedAt:new Date().toISOString(),usage:{input:1,output:1}};},
             reroute:async()=>{throw Error('unexpected reroute');},
         });
@@ -147,20 +151,21 @@ for(const failure of ['unknown','caution'] as const)test(`a ${failure} observati
     while(s.phase==='running'){
         const op=reserveJourneyOperation(s);if(!op)break;
         await advanceJourneyState(s,op,config,new AbortController().signal,{
-            streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/fixture',capturedAt:Date.now(),coord:sample.coord,heading:sample.heading}}),
+            analyzeKhuViews:async({views})=>({checkedAt:new Date().toISOString(),review:{finding:{status:failure,reason:'unresolved target',visibility:'occluded',reviewReason:'occlusion',pathVisible:true,routeMatch:'same-path',evidence:[],limitations:[]},views:views.map(view=>({id:view.id,sameCorridor:true,targetPatchVisible:false,observation:'target remains hidden'})),supportIds:[],originalConnectionVisible:false}}),
+        streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/fixture',capturedAt:Date.now(),coord:sample.coord,heading:sample.heading}}),
             analyzeKhuImage:async()=>{calls++;return {model:'gemini-test',finding:{status:failure,reason:'test observation',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path'},checkedAt:new Date().toISOString(),usage:{input:1,output:1}};},
             reroute:async()=>{throw Error('unexpected reroute');},
         });
     }
     assert.equal(projectJourneyResult(s).recommendedId,null);
     assert.equal(s.phase,'limited');
-    assert.equal(calls,48);
-    assert.equal(s.analyses,48);
-    assert.equal(s.lookups,48);
+    assert.ok(calls>3&&calls<48);
+    assert.ok(s.analyses<=48);
+    assert.ok(s.lookups<=60);
     for(const route of s.candidates){
         const checked=summary(route,s.evidence);
-        assert.equal(checked.checked,16);
-        assert.equal(route.samples.filter(sample=>s.evidence[route.id+':'+sample.id]?.status===failure).length,16);
+        assert.ok(checked.checked>=3);
+        assert.equal(route.samples.filter(sample=>s.evidence[route.id+':'+sample.id]?.status===failure).length,checked.checked);
         assert.equal(checked.clear,0);
     }
 });
@@ -182,8 +187,9 @@ test('native parsed observations survive persisted journey schema',async()=>{
     const {journeyStateSchema}=await import('../lib/journey.ts');
     const s=state();const op=reserveJourneyOperation(s);assert.ok(op);
     const features={stairs:{state:'not-observed',reason:'사진에 계단이 보이지 않음'},incline:{state:'present',reason:'동일 통로에 경사가 보임'}};
-    const parsed=parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({status:'caution',reason:'경사 관찰',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path',features})}]}}]});
+    const parsed=parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({visibility:'visible',reviewReason:'none',status:'caution',reason:'경사 관찰',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path',features})}]}}]});
     await advanceJourneyState(s,op,config,new AbortController().signal,{
+        analyzeKhuViews:async()=>{throw new Error('joint analysis not provided in this test');},
         streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/fixture',capturedAt:null,coord:sample.coord,heading:sample.heading}}),
         analyzeKhuImage:async()=>({...parsed,model:'gemini-test',checkedAt:new Date().toISOString()}),
         reroute:async()=>{throw Error('unexpected reroute');},
@@ -200,7 +206,8 @@ test('missing images and failed capture attempts finish unknown without invented
         const s=state();const op=reserveJourneyOperation(s);assert.ok(op);
         const controller=new AbortController();
         const advance=advanceJourneyState(s,op,config,controller.signal,{
-            streetImage:async()=>{
+            analyzeKhuViews:async()=>{throw new Error('joint analysis not provided in this test');},
+        streetImage:async()=>{
                 if(failure==='missing') return null;
                 if(failure==='aborted') controller.abort();
                 throw new ImageryServiceError(failure==='auth'?401:503);

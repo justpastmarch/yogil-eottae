@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import { imageInput, MAX_IMAGE_BYTES } from './khu.ts';
-import { meters, type Sample } from './domain.ts';
+import { bearing, meters, type Coord, type Sample } from './domain.ts';
 import type { ServerConfig } from './server-config';
 const coordinate = z.tuple([z.number().min(124).max(132), z.number().min(33).max(40)]);
-const source = z.object({ url: z.string().url().refine(value => { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password && ['map.kakao.com', 'kko.to', 'map.naver.com', 'naver.me', 'www.mapillary.com'].includes(u.hostname); }), capturedAt: z.number().min(0).refine(value => value <= Date.now()).nullable(), capturedMonth:z.string().regex(/^20\d{2}-(0[1-9]|1[0-2])$/).optional(), coord: coordinate, heading: z.number().min(0).max(360) });
+const source = z.object({ url: z.string().url().refine(value => { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password && ['map.kakao.com', 'kko.to', 'map.naver.com', 'naver.me', 'www.mapillary.com'].includes(u.hostname); }), capturedAt: z.number().min(0).refine(value => value <= Date.now()).nullable(), capturedMonth:z.string().regex(/^20\d{2}-(0[1-9]|1[0-2])$/).optional(), coord: coordinate, heading: z.number().min(0).max(360), panoId:z.string().optional() });
 const rendered = z.object({ image: imageInput, source });
 export type StreetImage = {
     image: z.infer<typeof imageInput>;
@@ -56,19 +56,20 @@ export function imageIsRecent(source: {capturedAt:number|null;capturedMonth?:str
     if(earliest===null&&source.capturedMonth){const [year,month]=source.capturedMonth.split('-').map(Number);earliest=Date.UTC(year,month-1,1);}
     return earliest!==null&&earliest<=now&&now-earliest<=365*86400000;
 }
-export async function streetImage(sample: Sample, config: ServerConfig, signal: AbortSignal): Promise<StreetImage | null> {
+export async function streetImage(sample: Sample, config: ServerConfig, signal: AbortSignal, options: { target?: Coord } = {}): Promise<StreetImage | null> {
     if (config.rendererUrl) {
         try {
-            const response = await checkedFetch(config.rendererUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + config.rendererToken, 'Content-Type': 'application/json' }, body: JSON.stringify({ coord: sample.coord, heading: sample.heading }) }, signal, 30000);
+            const response = await checkedFetch(config.rendererUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + config.rendererToken, 'Content-Type': 'application/json' }, body: JSON.stringify({ coord: sample.coord, heading: sample.heading, ...(options.target ? {target:options.target}: {}) }) }, signal, 30000);
             const bytes = await boundedBytes(response, 6 * 1024 * 1024), raw: unknown = JSON.parse(new TextDecoder().decode(bytes));
             if (raw !== null) {
                 const image = rendered.parse(raw);
-                if (meters(sample.coord, image.source.coord) <= 20 && Math.abs(((image.source.heading - sample.heading + 540) % 360) - 180) <= 65 && imageIsRecent(image.source)) return image;
+                const expectedHeading = options.target && meters(image.source.coord, options.target) > 0.5 ? bearing(image.source.coord, options.target) : sample.heading;
+                if (meters(sample.coord, image.source.coord) <= 20 && Math.abs(((image.source.heading - expectedHeading + 540) % 360) - 180) <= 65 && imageIsRecent(image.source)) return image;
             }
         } catch (error) {
             signal.throwIfAborted();
             if(error instanceof ImageryServiceError && ([401,403,404].includes(error.status) || error.status===429&&!config.mapillary)) throw error;
         }
     }
-    return config.mapillary ? mapillary(sample, config, signal) : null;
+    return config.mapillary ? mapillary(options.target ? {...sample,heading:bearing(sample.coord,options.target)} : sample, config, signal) : null;
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { authorized, captureMonth, parseCapture, parseOrigin, parseState } from './contract.mjs';
+import { authorized, captureMonth, parseCapture, parseOrigin, parseState, targetHeading } from './contract.mjs';
 
 test('capture boundary accepts coordinates and heading only', () => {
   assert.deepEqual(parseCapture({coord:[127,37],heading:359.9}), {coord:[127,37],heading:359.9});
@@ -27,4 +27,12 @@ test('capture date includes only the month present in visible text', () => {
   assert.equal(captureMonth('선택내용 :\n2026년 07월\n과거사진'), '2026-07');
   assert.equal(captureMonth('2020년 3월'), '2020-03');
   assert.equal(captureMonth('로드뷰 날짜 없음'), null);
+});
+
+test('target is a bounded coordinate and viewer heading uses actual panorama location',()=>{
+ assert.deepEqual(parseCapture({coord:[127,37],heading:90,target:[127,37.0001]}).target,[127,37.0001]);
+ for(const target of [null,[127,37.01],['127',37],[127],[Infinity,37]])assert.throws(()=>parseCapture({coord:[127,37],heading:90,target}));
+ assert.ok(targetHeading([127,37],[127,37.0001],90)<1);
+ assert.ok(Math.abs(targetHeading([127,37],[127.0001,37],0)-90)<1);
+ assert.equal(targetHeading([127,37],[127,37],45),45);
 });

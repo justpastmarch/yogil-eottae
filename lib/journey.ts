@@ -1,9 +1,10 @@
+import {captureAdjacentViews,evidenceSource} from './adjacent-views.ts';
 import {routeImageContext} from './route-context.ts';
 import {z} from 'zod';
-import {meters,recommendedRoute,inspectionOrder,type Evidence,type JourneyResult,type Place,type Coord,type Route} from './domain.ts';
+import {projectOnRoute,meters,recommendedRoute,inspectionOrder,type Evidence,type JourneyResult,type Place,type Coord,type Route} from './domain.ts';
 import {routes,reroute} from './providers.ts';
 import {blockedPassageFor,routeTouchesPassage,routeIsDistinct,detourViaPlans,validateCandidate} from './detours.ts';
-import {analyzeKhuImage,KhuError} from './khu.ts';
+import {analyzeKhuImage,analyzeKhuViews,validateJointFinding,KhuError} from './khu.ts';
 import {streetImage,ImageryServiceError} from './street-imagery.ts';
 import {serverConfig,type ServerConfig} from './server-config.ts';
 import {journeyResponse} from './requests.ts';
@@ -20,14 +21,30 @@ export const journeyStateSchema=z.object({
 export type JourneyState=z.infer<typeof journeyStateSchema>;
 export type JourneyInput={start:Place;end:Place;profile:string};
 type CaptureOperation={kind:'capture';route:Route;sample:Route['samples'][number]};
+type ReviewOperation={kind:'review';route:Route;sample:Route['samples'][number];captureLimit:number};
 type ReplanOperation={kind:'replan';via:Coord[]};
-export type JourneyOperation=CaptureOperation|ReplanOperation;
-export type JourneyDependencies={streetImage:typeof streetImage;analyzeKhuImage:typeof analyzeKhuImage;reroute:typeof reroute};
-const dependencies:JourneyDependencies={streetImage,analyzeKhuImage,reroute};
+export type JourneyOperation=CaptureOperation|ReviewOperation|ReplanOperation;
+export type JourneyDependencies={streetImage:typeof streetImage;analyzeKhuImage:typeof analyzeKhuImage;reroute:typeof reroute;analyzeKhuViews:typeof analyzeKhuViews};
+const dependencies:JourneyDependencies={streetImage,analyzeKhuImage,reroute,analyzeKhuViews};
 
+export function providerStairSamples(route:Route,profile:string):Route['samples'] {
+    if(!['수동 휠체어','전동 휠체어','유아차','보행 보조기'].includes(profile))return [];
+    return route.steps.filter(step=>step.text.replace(/\s+/g,'')==='계단이용').flatMap((step,index)=>{
+        const projection=projectOnRoute(route.coords,step.coord);
+        return projection&&projection.distance<=20?[{id:'provider-stairs-'+index,coord:projection.coord,along:projection.along,heading:projection.heading,critical:true}]:[];
+    });
+}
 export async function createJourneyState(input:JourneyInput,config:ServerConfig,signal:AbortSignal):Promise<JourneyState>{
     const candidates=(await routes(input.start,input.end,config.routing,signal)).routes;
-    return {...input,version:1,candidates,evidence:{},exclusions:[],pendingReplans:[],lookups:0,analyses:0,replans:0,phase:config.mapillary||config.rendererUrl?'running':'limited'};
+    const exclusions:JourneyState['exclusions']=[];
+    for(const route of candidates){
+        const stairs=providerStairSamples(route,input.profile);
+        if(stairs.length)route.knownBarriers=['길찾기 안내에 계단 포함'];
+        for(const sample of stairs)exclusions.push(blockedPassageFor(route,sample));
+    }
+    const firstPassage=exclusions[0],firstRoute=candidates.find(route=>route.id===firstPassage?.routeId);
+    const pendingReplans=firstPassage&&firstRoute&&config.routing.kind==='kakao'?detourViaPlans(firstRoute,firstPassage):[];
+    return {...input,version:1,candidates,evidence:{},exclusions,pendingReplans,lookups:0,analyses:0,replans:0,phase:config.mapillary||config.rendererUrl?'running':'limited'};
 }
 export function projectJourneyResult(state:JourneyState):JourneyResult{
     const assessments=Object.fromEntries(state.candidates.map(route=>[route.id,{blockedPassageIds:state.exclusions.filter(p=>routeTouchesPassage(route,p)).map(p=>p.id)}]));
@@ -38,6 +55,14 @@ export function projectJourneyResult(state:JourneyState):JourneyResult{
 export function reserveJourneyOperation(state:JourneyState):JourneyOperation|null{
     if(state.phase!=='running') return null;
     if(projectJourneyResult(state).recommendedId){state.phase='ready';return null;}
+    const pending=inspectionOrder(state.candidates).find(({route,sample})=>state.evidence[route.id+':'+sample.id]?.review?.state==='pending');
+    if(pending&&state.lookups<60&&state.analyses<48){
+        const captureLimit=Math.min(3,60-state.lookups);
+        const item=state.evidence[pending.route.id+':'+pending.sample.id];
+        if(item.review)item.review.state='reserved';
+        state.lookups+=captureLimit;state.analyses++;
+        return {kind:'review',...pending,captureLimit};
+    }
     if(state.pendingReplans.length&&state.replans<4&&state.candidates.length<6){
         const via=state.pendingReplans.shift();
         if(via){state.replans++;return {kind:'replan',via};}
@@ -64,14 +89,40 @@ export function reserveJourneyOperation(state:JourneyState):JourneyOperation|nul
 }
 
 export async function advanceJourneyState(state:JourneyState,operation:JourneyOperation,config:ServerConfig,signal:AbortSignal,deps:JourneyDependencies=dependencies):Promise<void>{
+    if(operation.kind==='review'){
+        const {route,sample,captureLimit}=operation,key=route.id+':'+sample.id,item=state.evidence[key],review=item?.review;
+        if(!review)return;
+        review.state='complete';
+        try {
+            const captured=await captureAdjacentViews({route,sample,limit:captureLimit,config,signal,capture:deps.streetImage});
+            state.lookups-=captureLimit-captured.attempts;
+            review.sources=captured.views.map(view=>({id:view.id,source:evidenceSource(view.image,sample)}));
+            if(!captured.views.length){state.analyses--;review.note='전후 거리영상을 확보하지 못해 기존 판정을 유지했습니다.';return;}
+            const result=await deps.analyzeKhuViews({apiKey:config.ai,model:config.model,views:captured.views.map(view=>({id:view.id,image:view.image.image})),profile:state.profile,context:'원래 판정: '+JSON.stringify(review.initialFinding)+'\n원래 목표 좌표: '+JSON.stringify(sample.coord)+'\n'+captured.context,signal:AbortSignal.any([signal,AbortSignal.timeout(35000)])});
+            const independent=captured.views.filter((view,index,all)=>all.slice(0,index).every(other=>meters(other.image.source.coord,view.image.source.coord)>=1)).length;
+            const joint=validateJointFinding(result.review,captured.views.map(view=>view.id),independent);
+            review.result=joint.finding;review.supportIds=joint.supportIds;
+            review.note=independent>=2?'서로 다른 촬영 위치의 전후 영상을 대조했습니다.':'서로 다른 촬영 위치가 충분하지 않아 원래 가려진 연결부를 확정하지 않았습니다.';
+            if(!(item.status==='blocked'&&item.finding?.routeMatch==='same-path')){
+                item.finding=joint.finding;item.status=joint.finding.status;item.reason=joint.finding.reason;item.checkedAt=result.checkedAt;
+            }
+            if(item.status==='blocked'&&item.finding?.routeMatch==='same-path'){
+                const passage=blockedPassageFor(route,sample);
+                if(!state.exclusions.some(existing=>existing.id===passage.id))state.exclusions.push(passage);
+                if(config.routing.kind==='kakao')state.pendingReplans=detourViaPlans(route,passage);
+            }
+        } catch(error){review.note='전후 영상 대조를 완료하지 못해 기존 판정을 유지했습니다.';signal.throwIfAborted();if(error instanceof KhuError&&[401,402,403,404,429].includes(error.status))throw error;}
+        return;
+    }
     if(operation.kind==='replan'){
         if(config.routing.kind!=='kakao') return;
         const baseline=state.candidates.reduce<Route|undefined>((best,route)=>!best||route.distance<best.distance?route:best,undefined);
         if(!baseline) return;
         try{
             const alternative=await deps.reroute(state.start,state.end,config.routing,operation.via,signal);
+            if(providerStairSamples(alternative,state.profile).length)return;
             if(validateCandidate(alternative,baseline,state.exclusions).ok&&routeIsDistinct(alternative,state.candidates)){
-                alternative.detourReason='영상에서 관찰된 통행 장애 구간을 피해 다시 찾은 경로';
+                alternative.detourReason='통행 장애 구간을 피해 다시 찾은 경로';
                 state.candidates.unshift(alternative);
             }
         }catch(error){
@@ -89,7 +140,9 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
             return;
         }
         const result=await deps.analyzeKhuImage({apiKey:config.ai,model:config.model,image:image.image,profile:state.profile,context:routeImageContext({route,sample,source:image.source}),signal});
-        finding={sampleId:sample.id,stage:'processed',status:result.finding.status,reason:result.finding.reason,finding:result.finding,source:{url:image.source.url,capturedAt:image.source.capturedAt,...(image.source.capturedMonth?{capturedMonth:image.source.capturedMonth}:{}),coord:image.source.coord,distance:Math.round(meters(sample.coord,image.source.coord))},checkedAt:result.checkedAt};
+        finding={sampleId:sample.id,stage:'processed',status:result.finding.status,reason:result.finding.reason,finding:result.finding,source:evidenceSource(image,sample),checkedAt:result.checkedAt};
+        const reason=result.finding.reviewReason==='occlusion'||result.finding.visibility==='occluded'?'occlusion':'corridor-uncertain';
+        if(result.finding.status==='unknown'||result.finding.status==='caution'||result.finding.reviewReason==='occlusion'||result.finding.visibility==='occluded')finding.review={state:'pending',reason,initialFinding:result.finding,initialSource:evidenceSource(image,sample),sources:[],supportIds:[],note:'전후 거리영상에서 같은 연결부를 다시 살펴볼 예정입니다.'};
         state.evidence[key]=finding;
     }catch(error){
         state.evidence[key]={sampleId:sample.id,stage:'processed',status:'unknown',reason:'이 구간의 이동 환경 정보를 가져오지 못했습니다.',checkedAt:new Date().toISOString()};

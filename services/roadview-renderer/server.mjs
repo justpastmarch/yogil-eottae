@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { chromium } from 'playwright';
 import {routeRendererRequest} from './request-policy.mjs';
-import { authorized, captureMonth, parseCapture, parseOrigin, parseState } from './contract.mjs';
+import { authorized, captureMonth, parseCapture, parseOrigin, parseState, targetHeading } from './contract.mjs';
 
 const token = process.env.ROADVIEW_RENDERER_TOKEN;
 if (!token || token.length < 24) throw new Error('ROADVIEW_RENDERER_TOKEN must have at least 24 characters');
@@ -71,9 +71,10 @@ async function capture(input, signal) {
     });
     const state = parseState(JSON.parse(await page.locator('#capture-state').textContent()));
     if (!state) return null;
+    const heading = input.target ? targetHeading(state.coord, input.target, state.heading) : state.heading;
     const original = new URL('https://map.kakao.com/');
     original.search = new URLSearchParams({ map_type: 'TYPE_MAP', map_attribute: 'ROADVIEW', panoid: state.panoId,
-      pan: String(state.heading), tilt: '-7', zoom: '0' }).toString();
+      pan: String(heading), tilt: '-7', zoom: '0' }).toString();
     let panoramaImages = 0;
     page.on('requestfinished', async request => {
       const response = await request.response().catch(() => null);
@@ -124,7 +125,7 @@ async function capture(input, signal) {
     if (!painted) throw new Error('Panorama did not paint');
     return { image: { mime: 'image/jpeg', data: jpeg.toString('base64') },
       source: { capturedAt: null, ...(month ? { capturedMonth: month } : {}),
-        coord: state.coord, heading: state.heading, url: original.href } };
+        coord: state.coord, heading, panoId:state.panoId, url: original.href } };
   } finally {
     signal.removeEventListener('abort', close);
     await context?.close().catch(() => {});
