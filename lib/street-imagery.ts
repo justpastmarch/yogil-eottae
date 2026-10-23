@@ -3,7 +3,7 @@ import { imageInput, MAX_IMAGE_BYTES } from './khu';
 import { meters, type Sample } from './domain';
 import type { ServerConfig } from './server-config';
 const coordinate = z.tuple([z.number().min(124).max(132), z.number().min(33).max(40)]);
-const source = z.object({ url: z.string().url().refine(value => { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password && ['map.kakao.com', 'kko.to', 'map.naver.com', 'naver.me', 'www.mapillary.com'].includes(u.hostname); }), capturedAt: z.number().min(0).max(Date.now()), coord: coordinate, heading: z.number().min(0).max(360) });
+const source = z.object({ url: z.string().url().refine(value => { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password && ['map.kakao.com', 'kko.to', 'map.naver.com', 'naver.me', 'www.mapillary.com'].includes(u.hostname); }), capturedAt: z.number().min(0).refine(value => value <= Date.now()), coord: coordinate, heading: z.number().min(0).max(360) });
 const rendered = z.object({ image: imageInput, source });
 export type StreetImage = {
     image: z.infer<typeof imageInput>;
@@ -11,8 +11,11 @@ export type StreetImage = {
 };
 const capture = z.object({ id: z.string(), geometry: z.object({ coordinates: coordinate }), captured_at: z.number(), thumb_1024_url: z.string().url(), compass_angle: z.number().nullable().optional(), is_pano: z.boolean().optional() });
 const captures = z.object({ data: z.array(capture), paging: z.object({ next: z.string().optional() }).optional() });
+export class ImageryServiceError extends Error {
+    constructor(public status:number){super('Imagery service unavailable');}
+}
 async function checkedFetch(url: string, init: RequestInit, signal: AbortSignal) { const response = await fetch(url, { ...init, redirect: 'error', cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(12000)]) }); if (!response.ok)
-    throw new Error('Imagery unavailable'); return response; }
+    throw new ImageryServiceError(response.status); return response; }
 async function boundedBytes(response: Response, max: number) { const reader = response.body?.getReader(); if (!reader)
     throw new Error('Empty image'); const chunks: Uint8Array[] = []; let size = 0; while (true) {
     const chunk = await reader.read();

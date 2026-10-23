@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { recommendedRoute, samplesFor, type Route, type Evidence } from '../lib/domain.ts';
+import { recommendedRoute, samplesFor, inspectionOrder, type Route, type Evidence } from '../lib/domain.ts';
 import { requestSchema } from '../lib/requests.ts';
 import { serverConfig, runWithServerEnv } from '../lib/server-config.ts';
 const place = { id: 'a', name: 'a', address: 'a', coord: [127, 37] };
@@ -8,6 +8,16 @@ const route: Route = { id: 'r', name: 'r', options: [], coords: [[127, 37], [127
 test('one clear observation cannot recommend an otherwise uninspected journey', () => {
     const evidence: Evidence = { sampleId: 's0', status: 'clear', reason: 'clear', checkedAt: '' };
     assert.equal(recommendedRoute([route], { 'r:s0': evidence }), null);
+});
+test('bounded inspection finishes a candidate instead of leaving every candidate incomplete', () => {
+    const samples=samplesFor([[127,37],[127,37.004]]);
+    const candidates=['a','b','c'].map(id=>({...route,id,samples}));
+    const evidence:Record<string,Evidence>={};
+    for(const {route:candidate,sample} of inspectionOrder(candidates).slice(0,24)){
+        evidence[candidate.id+':'+sample.id]={sampleId:sample.id,status:'clear',reason:'observed',checkedAt:''};
+    }
+    assert.equal(recommendedRoute(candidates,evidence),'a');
+    assert.ok(inspectionOrder([{...route,samples:samplesFor([[127,37],[127,37.012]])}]).length<120);
 });
 test('recommendation requires completion and rejects any blocked or unknown sample', () => {
     const evidence: Record<string, Evidence> = Object.fromEntries(route.samples.map(sample => ['r:' + sample.id, { sampleId: sample.id, status: 'clear', reason: 'observed', checkedAt: '' }]));

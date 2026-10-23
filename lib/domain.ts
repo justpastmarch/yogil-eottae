@@ -58,6 +58,11 @@ export type JourneyResult = {
 export function recommendedRoute(routes: Route[], evidence: Record<string, Evidence>): string | null {
     return rankRoutes(routes, evidence).find(route => { const s = summary(route, evidence); return s.total > 0 && s.checked === s.total && s.unknown === 0 && s.blocked === 0; })?.id ?? null;
 }
+export function inspectionOrder(routes: Route[]) {
+    return routes.flatMap(route => [...route.samples]
+        .sort((a, b) => Number(b.critical) - Number(a.critical) || a.along - b.along)
+        .map(sample => ({route, sample})));
+}
 export function meters(a: Coord, b: Coord) { const r = Math.PI / 180, dp = (b[1] - a[1]) * r, dl = (b[0] - a[0]) * r; const v = Math.sin(dp / 2) ** 2 + Math.cos(a[1] * r) * Math.cos(b[1] * r) * Math.sin(dl / 2) ** 2; return 6371000 * 2 * Math.atan2(Math.sqrt(v), Math.sqrt(Math.max(0, 1 - v))); }
 export function bearing(a: Coord, b: Coord) { const r = Math.PI / 180; return (Math.atan2(Math.sin((b[0] - a[0]) * r) * Math.cos(b[1] * r), Math.cos(a[1] * r) * Math.sin(b[1] * r) - Math.sin(a[1] * r) * Math.cos(b[1] * r) * Math.cos((b[0] - a[0]) * r)) * 180 / Math.PI + 360) % 360; }
 export function samplesFor(coords: Coord[], critical: Coord[] = [], spacing = 50): Sample[] {
