@@ -55,9 +55,11 @@ test('real D1 lease, owner isolation, expiration and cancel prevent stale commit
         assert.match(attempted.reason,/중단/);
         assert.equal(attempted.finding,undefined);
         assert.equal(summary(recovering.candidates[0],recovered.evidence).checked,1);
-        assert.equal(reserveJourneyOperation(recovered),null);
-        assert.equal(recovered.lookups,1);
-        assert.equal(recovered.analyses,1);
+        const continued=reserveJourneyOperation(recovered);
+        assert.equal(continued?.kind,'capture');
+        assert.notEqual(continued?.kind==='capture'?continued.sample.id:null,attempted.sampleId);
+        assert.equal(recovered.lookups,2);
+        assert.equal(recovered.analyses,2);
         assert.equal(projectJourneyResult(recovered).recommendedId,null);
         assert.equal(await store.write('recovery','owner',stale,state(),true,91_003),null);
     }finally{await mf.dispose();}
@@ -71,8 +73,9 @@ test('interrupted capture reservation stays unknown and cannot recommend a route
     assert.equal(Object.values(s.evidence)[0].stage,'reserved');
     assert.equal(summary(s.candidates[0],s.evidence).checked,0);
     const second=reserveJourneyOperation(s);
-    assert.equal(second,null);
-    assert.equal(s.phase,'limited');
+    assert.equal(second?.kind,'capture');
+    assert.notEqual(second?.kind==='capture'?second.sample.id:null,first?.kind==='capture'?first.sample.id:null);
+    assert.equal(s.phase,'running');
     assert.equal(projectJourneyResult(s).recommendedId,null);
 });
 test('renderer 429 retains real routes as limited instead of discarding them',async()=>{
@@ -112,25 +115,66 @@ test('a clear result completes only after every sample has its own image finding
     assert.equal(calls,s.candidates[0].samples.length);assert.equal(s.phase,'ready');assert.equal(projectJourneyResult(s).recommendedId,'r');
 });
 
-for(const failure of ['unknown','caution'] as const)test(`a ${failure} first route does not consume the budget needed for a clear alternative`,async()=>{
+test('three clear 32-point candidates complete one recommendation before the 48-analysis limit',async()=>{
+    const s=state();
+    const coords:[number,number][]=[[127,37],[127.017,37]];
+    const first={...s.candidates[0],coords,samples:samplesFor(coords)};
+    assert.equal(first.samples.length,32);
+    s.candidates=[first,{...first,id:'alternative'},{...first,id:'third'}];
+    let calls=0;
+    while(s.phase==='running'){
+        const op=reserveJourneyOperation(s);if(!op)break;
+        await advanceJourneyState(s,op,config,new AbortController().signal,{
+            streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/fixture',capturedAt:Date.now(),coord:sample.coord,heading:sample.heading}}),
+            analyzeKhuImage:async()=>{calls++;return {model:'gemini-test',finding:{status:'clear',reason:'visible path',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path'},checkedAt:new Date().toISOString(),usage:{input:1,output:1}};},
+            reroute:async()=>{throw Error('unexpected reroute');},
+        });
+    }
+    assert.equal(s.phase,'ready');
+    assert.equal(projectJourneyResult(s).recommendedId,'r');
+    assert.equal(calls,32);
+    assert.equal(summary(first,s.evidence).clear,32);
+});
+
+for(const failure of ['unknown','caution'] as const)test(`a ${failure} observation allows remaining points and balances candidates within the analysis limit`,async()=>{
     const s=state();
     const coords:[number,number][]=[[127,37],[127.015,37]];
     const first={...s.candidates[0],coords,samples:samplesFor(coords)};
     const second={...first,id:'alternative',name:'alternative'};
-    s.candidates=[first,second];
+    s.candidates=[first,second,{...first,id:'third',name:'third'}];
     assert.ok(first.samples.length+second.samples.length>48);
     let calls=0;
     while(s.phase==='running'){
         const op=reserveJourneyOperation(s);if(!op)break;
         await advanceJourneyState(s,op,config,new AbortController().signal,{
             streetImage:async sample=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://example.com/fixture',capturedAt:Date.now(),coord:sample.coord,heading:sample.heading}}),
-            analyzeKhuImage:async()=>({model:'gemini-test',finding:{status:++calls===1?failure:'clear',reason:'test observation',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path'},checkedAt:new Date().toISOString(),usage:{input:1,output:1}}),
+            analyzeKhuImage:async()=>{calls++;return {model:'gemini-test',finding:{status:failure,reason:'test observation',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path'},checkedAt:new Date().toISOString(),usage:{input:1,output:1}};},
             reroute:async()=>{throw Error('unexpected reroute');},
         });
     }
-    assert.equal(projectJourneyResult(s).recommendedId,'alternative');
-    assert.equal(calls,1+second.samples.length);
-    assert.ok(calls<=48);
+    assert.equal(projectJourneyResult(s).recommendedId,null);
+    assert.equal(s.phase,'limited');
+    assert.equal(calls,48);
+    assert.equal(s.analyses,48);
+    assert.equal(s.lookups,48);
+    for(const route of s.candidates){
+        const checked=summary(route,s.evidence);
+        assert.equal(checked.checked,16);
+        assert.equal(route.samples.filter(sample=>s.evidence[route.id+':'+sample.id]?.status===failure).length,16);
+        assert.equal(checked.clear,0);
+    }
+});
+
+test('lookup limit and observed blocked passages stop further capture without inventing clear findings',()=>{
+    const limited=state();limited.lookups=60;
+    assert.equal(reserveJourneyOperation(limited),null);
+    assert.equal(limited.phase,'limited');
+    assert.equal(Object.keys(limited.evidence).length,0);
+    const blocked=state();const sample=blocked.candidates[0].samples[0];
+    blocked.evidence['r:'+sample.id]={sampleId:sample.id,stage:'processed',status:'blocked',reason:'stairs on route',checkedAt:'',finding:{status:'blocked',reason:'stairs on route',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path'}};
+    assert.equal(reserveJourneyOperation(blocked),null);
+    assert.equal(projectJourneyResult(blocked).recommendedId,null);
+    assert.equal(Object.keys(blocked.evidence).length,1);
 });
 
 test('native parsed observations survive persisted journey schema',async()=>{

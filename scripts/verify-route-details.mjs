@@ -9,9 +9,8 @@ const browser=await chromium.launch({channel:'chrome',headless:true});const page
 page.on('pageerror',e=>errors.push(e.message));page.on('response',async res=>{if(res.url().endsWith('/api/action')){try{const d=await res.json();if(d.jobId)latest=d;}catch{}}});
 try{
  await page.goto(process.env.DETAILS_BASE_URL??'http://localhost:3000/',{waitUntil:'networkidle'});
- await page.getByRole('button',{name:'출발지 검색',exact:true}).click();await page.locator('.place-result').first().waitFor();await page.locator('.place-result').first().click();
- await page.getByRole('button',{name:'도착지 검색',exact:true}).click();const destination=page.locator('.place-result').filter({hasText:'경희대학교 국제캠퍼스 학생회관'}).first();await destination.waitFor();await destination.click();
  await page.getByRole('button',{name:'경로 찾기',exact:false}).click();await page.locator('.route-card').first().waitFor({timeout:30000});
+ assert.equal(await page.locator('.place-result').count(),0,'Exact default endpoints must resolve in one route action without duplicate selection');
  await page.locator('.route-detail-button').first().click();await page.getByRole('heading',{name:'넓은 길 상세',exact:true}).waitFor();
  assert.equal(await page.locator('#from').count(),0);assert.equal(await page.locator('.detail-grade strong').innerText(),'미측정');
  console.log(JSON.stringify({stage:'detail-open',headingFocused:await page.evaluate(()=>document.activeElement?.tagName==='H2'),mapVisible:await page.locator('.map').isVisible()}));
@@ -27,10 +26,12 @@ try{
  await page.locator('.detail-point.focused').waitFor();
  await page.waitForFunction(oldScale=>{const scale=document.querySelector('.map')?.innerText.split('\n').find(text=>/^\d+(?:k)?m$/.test(text));return !!scale&&scale!==oldScale;},overviewScale,{timeout:5000});
  const scaleBefore=(await page.locator('.map').innerText()).split('\n').find(text=>/^\d+(?:k)?m$/.test(text));
- if(latest.phase==='running'){const beforePoll=await page.locator('.map button[data-evidence-id]').nth(10).elementHandle();await page.waitForResponse(res=>res.url().endsWith('/api/action'),{timeout:90000});await page.waitForFunction(element=>!element.isConnected,beforePoll,{timeout:5000});}
+ if(latest.phase==='running'){const beforePoll=await page.locator('.map button[data-evidence-id]').nth(10).elementHandle(),checked=latest.progress.checked;await page.waitForResponse(async res=>{if(!res.url().endsWith('/api/action'))return false;try{const data=await res.json();return data.jobId&&data.progress.checked>checked;}catch{return false;}},{timeout:90000});await page.waitForFunction(element=>!element.isConnected,beforePoll,{timeout:5000});}
  const scaleAfter=(await page.locator('.map').innerText()).split('\n').find(text=>/^\d+(?:k)?m$/.test(text));
  assert.equal(scaleAfter,scaleBefore,'Polling must not reset the point inspection zoom');
- await page.waitForFunction(()=>!document.querySelector('.progress'),{},{timeout:240000});
+ await page.getByRole('button',{name:'경로 목록으로',exact:true}).click();
+ const stop=page.getByRole('button',{name:'중지',exact:true});if(await stop.isVisible())await stop.click();
+ await page.locator('.route-detail-button').first().click();
  await page.getByRole('button',{name:/판독 결과/}).click();await page.locator('.detail-body').evaluate(el=>el.scrollTop=0);
  assert.ok(Object.values(latest.journey.evidence).some(e=>e.finding?.features&&e.source),'Actual new AI inference must include structured features');
  await page.screenshot({path:path.join(reportDir,'경로상세-요약.png')});

@@ -1,5 +1,5 @@
 'use client';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
 import { ArrowUpDown, ArrowRight, ChevronRight, MapPin, Route as RouteIcon, Navigation, Accessibility, Check, Search, X, LoaderCircle, LocateFixed, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import MapView from './Map';
 import RouteDetails from './RouteDetails';
@@ -18,11 +18,16 @@ type Screen = {
     kind: 'error';
     message: string;
 };
-const labels = { clear: '이동 공간 확인', caution: '주의 구간', blocked: '이동 장애물', unknown: '정보 부족' };
+type LocationField = 'start' | 'end';
+type LocationSearch = {field:LocationField;kind:'loading'} | {field:LocationField;kind:'results';places:Place[]} | {field:LocationField;kind:'error';message:string};
+const normalizedPlaceName = (value:string) => value.replace(/\s+/g,'').toLowerCase();
 export default function Page() {
     const [screen, setScreen] = useState<Screen>({ kind: 'idle' }), [profile, setProfile] = useState('수동 휠체어');
     const [from, setFrom] = useState('수원시 영통구 영통동 992-1'), [to, setTo] = useState('경희대학교 국제캠퍼스 학생회관');
-    const [start, setStart] = useState<Place | null>(null), [end, setEnd] = useState<Place | null>(null), [results, setResults] = useState<Place[]>([]), [searchFor, setSearchFor] = useState<'start' | 'end' | null>(null);
+    const [start, setStart] = useState<Place | null>(null), [end, setEnd] = useState<Place | null>(null);
+    const [locationSearch,setLocationSearch]=useState<LocationSearch|null>(null),[focusedField,setFocusedField]=useState<LocationField|null>(null),[highlighted,setHighlighted]=useState(-1);
+    const locationRequest=useRef<AbortController|null>(null);
+    const searchTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
     const [selected, setSelected] = useState(''), [active, setActive] = useState(''), [focus, setFocus] = useState<Coord | null>(null), [pick, setPick] = useState<'start' | 'end' | null>(null), [collapsed, setCollapsed] = useState(false), [nav, setNav] = useState(false), [step, setStep] = useState(0);
     const [detailRouteId,setDetailRouteId]=useState<string|null>(null);
     const listScroll=useRef<HTMLDivElement>(null);
@@ -35,45 +40,56 @@ export default function Page() {
         controller: AbortController | null;
         jobId: string | null;
     }>({ generation: 0, controller: null, jobId:null });
-    useEffect(() => () => stopJob(), []);
+    useEffect(() => () => {stopJob();locationRequest.current?.abort();}, []);
+    useEffect(()=>{if(!focusedField)return;const query=focusedField==='start'?from:to;const place=focusedField==='start'?start:end;if(place)return;searchTimer.current=setTimeout(()=>void find(focusedField,query),300);return()=>{if(searchTimer.current)clearTimeout(searchTimer.current);};},[focusedField,from,to,start,end]);
     const journey = screen.kind === 'result' ? screen.journey : null, routes = journey?.routes ?? [], evidence = journey?.evidence ?? {}, route = routes.find(r => r.id === selected), analyzing = screen.kind === 'result' && screen.analysis.phase === 'running', busy = screen.kind === 'loading' || analyzing;
     const detailRoute=routes.find(candidate=>candidate.id===detailRouteId);
     function openDetails(id:string,pointId=''){if(!detailRouteId)listPosition.current=listScroll.current?.scrollTop??0;setSelected(id);setDetailRouteId(id);setActive(pointId);setNav(false);setStep(0);}
     function closeDetails(){returnToRoute.current=detailRouteId;setDetailRouteId(null);setActive('');}
     function inspectPoint(id:string){const candidate=routes.find(candidate=>candidate.samples.some(sample=>candidate.id+':'+sample.id===id));if(candidate){openDetails(candidate.id,id);const point=candidate.samples.find(sample=>candidate.id+':'+sample.id===id);if(point)setFocus([point.coord[0],point.coord[1]]);}}
     function stopJob() { request.current.controller?.abort(); const jobId=request.current.jobId; request.current.jobId=null; if(jobId) void fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'cancel',jobId}),keepalive:true}).catch(()=>{}); }
-    function reset() { returnToRoute.current=null;setDetailRouteId(null);stopJob(); request.current.generation++; setScreen({ kind: 'idle' }); setSelected(''); setActive(''); setNav(false); setStep(0); setFocus(null); setResults([]); setSearchFor(null); }
+    function reset() { returnToRoute.current=null;setDetailRouteId(null);stopJob(); request.current.generation++; setScreen({ kind: 'idle' }); setSelected(''); setActive(''); setNav(false); setStep(0); setFocus(null); closeSearch(); }
     function begin(message: string) { returnToRoute.current=null;setDetailRouteId(null);stopJob(); const controller = new AbortController(); request.current = { generation: request.current.generation + 1, controller, jobId:null }; setScreen({ kind: 'loading', message }); setActive(''); setNav(false); setStep(0); return { generation: request.current.generation, controller }; }
     async function call(body: unknown, signal: AbortSignal): Promise<unknown> { const response = await fetch('/api/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }); if (!response.ok)
         throw new Error(response.status === 400 ? '출발지와 도착지를 확인해 주세요.' : '길찾기 서비스를 잠시 이용할 수 없습니다. 잠시 후 다시 시도해 주세요.'); return response.json(); }
-    async function find(which: 'start' | 'end') {
-        const query = which === 'start' ? from : to;
-        if (query.trim().length < 2)
-            return;
-        const task = begin('장소를 찾고 있어요');
-        setSearchFor(which);
-        setResults([]);
-        try {
-            const data = searchResponse.parse(await call({ action: 'search', query, address: which === 'start' && /\d/.test(query) }, task.controller.signal));
-            if (task.generation !== request.current.generation)
-                return;
-            setResults(data.places);
-            setScreen(data.places.length ? { kind: 'idle' } : { kind: 'error', message: '검색 결과가 없습니다. 다른 이름으로 검색하거나 지도에서 선택해 주세요.' });
-        }
-        catch (error) {
-            if (task.generation !== request.current.generation || task.controller.signal.aborted)
-                return;
-            setScreen({ kind: 'error', message: error instanceof Error ? error.message : '장소를 찾지 못했습니다.' });
-        }
+    function closeSearch(){if(searchTimer.current)clearTimeout(searchTimer.current);locationRequest.current?.abort();setLocationSearch(null);setFocusedField(null);setHighlighted(-1);}
+    async function searchPlaces(query:string,signal:AbortSignal){
+        const address=/\d/.test(query);
+        const places=searchResponse.parse(await call({action:'search',query,address},signal)).places;
+        return address&&!places.length?searchResponse.parse(await call({action:'search',query,address:false},signal)).places:places;
     }
-    function choose(place: Place) { const which = searchFor; reset(); if (which === 'start') {
-        setStart(place);
-        setFrom(place.name);
+    async function find(which:LocationField,query=which==='start'?from:to) {
+        if(searchTimer.current)clearTimeout(searchTimer.current);
+        locationRequest.current?.abort();
+        setHighlighted(-1);
+        if(query.trim().length<2){setLocationSearch(null);return;}
+        const controller=new AbortController();locationRequest.current=controller;
+        setLocationSearch({field:which,kind:'loading'});
+        try{
+            const places=await searchPlaces(query,controller.signal);
+            if(controller.signal.aborted)return;
+            setLocationSearch(places.length?{field:which,kind:'results',places}:{field:which,kind:'error',message:'검색 결과가 없어요. 다른 이름이나 주소를 입력해 주세요.'});
+        }catch(error){if(!controller.signal.aborted)setLocationSearch({field:which,kind:'error',message:error instanceof Error?error.message:'장소를 찾지 못했어요.'});}
     }
-    else {
-        setEnd(place);
-        setTo(place.name);
-    } }
+    function choose(which:LocationField,place:Place) {
+        reset();
+        if(which==='start'){setStart(place);setFrom(place.name);}else{setEnd(place);setTo(place.name);}
+        setPick(null);
+    }
+    function editLocation(which:LocationField,value:string){reset();setFocusedField(which);setPick(null);if(which==='start'){setFrom(value);setStart(null);}else{setTo(value);setEnd(null);}}
+    function locationKey(event:KeyboardEvent<HTMLInputElement>,which:LocationField){
+        if(event.nativeEvent.isComposing||event.keyCode===229)return;
+        const places=locationSearch?.field===which&&locationSearch.kind==='results'?locationSearch.places:[];
+        if(event.key==='Escape'){closeSearch();return;}
+        if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setHighlighted(previous=>!places.length?-1:previous<0?(event.key==='ArrowDown'?0:places.length-1):(previous+(event.key==='ArrowDown'?1:-1)+places.length)%places.length);return;}
+        if(event.key==='Enter'){event.preventDefault();if(places.length)choose(which,places[highlighted<0?0:highlighted]);else void find(which);}
+    }
+    function locationInput(which:LocationField){
+        const field=which==='start'?'출발지':'도착지',id=which==='start'?'from':'to';
+        const search=locationSearch?.field===which?locationSearch:null;
+        return <div className="location-field" key={which}><div className="location-row"><span className={'location-dot '+which}/><label className="sr-only" htmlFor={id}>{field}</label><input id={id} value={which==='start'?from:to} autoComplete="off" role="combobox" aria-autocomplete="list" aria-expanded={!!search} aria-controls={search?id+'-suggestions':undefined} aria-activedescendant={search?.kind==='results'&&highlighted>=0?id+'-option-'+highlighted:undefined} onFocus={()=>setFocusedField(which)} onChange={event=>editLocation(which,event.target.value)} onKeyDown={event=>locationKey(event,which)}/><button aria-label={field+' 검색'} onClick={()=>void find(which)}><Search size={18}/></button></div>
+        {search&&<div className="search-results" id={id+'-suggestions'}><div className="result-heading">{field} 검색<button aria-label="검색 결과 닫기" onClick={closeSearch}><X size={16}/></button></div>{search.kind==='loading'?<p role="status">장소를 찾고 있어요</p>:search.kind==='error'?<p role="status">{search.message}</p>:<div role="listbox" aria-label={field+' 검색 결과'}>{search.places.map((place,index)=><button key={place.id} id={id+'-option-'+index} role="option" aria-selected={highlighted===index} className="place-result" onClick={()=>choose(which,place)}><MapPin size={17}/><span><b>{place.name}</b><small>{place.address}</small></span><ChevronRight size={16}/></button>)}</div>}</div>}</div>;
+    }
     function point(coord: Coord) { if (!pick)
         return; const which = pick; reset(); const name = which === 'start' ? '선택한 출발지' : '선택한 도착지', place = { id: 'map-' + Date.now(), name, address: '지도에서 선택한 위치', coord }; if (which === 'start') {
         setStart(place);
@@ -84,14 +100,29 @@ export default function Page() {
         setTo(name);
     } setPick(null); }
     async function findJourney() {
-        if (!start || !end) {
-            await find(!start ? 'start' : 'end');
-            return;
-        }
-        const task = begin('이동 환경을 살펴보고 우회 경로를 찾고 있어요');
+        closeSearch();
+        const task = begin('출발지와 도착지를 확인하고 있어요');
         setSelected('');
         try {
-            let snapshot = journeySnapshotResponse.parse(await call({ action: 'journey', start, end, profile }, task.controller.signal));
+            const resolve=async(which:LocationField,selectedPlace:Place|null,query:string)=>{
+                if(selectedPlace)return selectedPlace;
+                if(query.trim().length<2)throw new Error('출발지와 도착지를 두 글자 이상 입력해 주세요.');
+                const places=await searchPlaces(query,task.controller.signal);
+                const exact=places.filter(place=>normalizedPlaceName(place.name)===normalizedPlaceName(query)||normalizedPlaceName(place.address)===normalizedPlaceName(query));
+                const resolved=exact.length===1?exact[0]:places.length===1&&places[0].id.startsWith('address-')?places[0]:null;
+                if(!resolved){
+                    if(task.generation===request.current.generation){setScreen({kind:'idle'});setLocationSearch(places.length?{field:which,kind:'results',places}:{field:which,kind:'error',message:'검색 결과가 없어요. 이름이나 주소를 수정해 주세요.'});document.getElementById(which==='start'?'from':'to')?.focus();setFocusedField(null);}
+                    return null;
+                }
+                if(task.generation!==request.current.generation)return null;
+                if(which==='start')setStart(resolved);else setEnd(resolved);
+                return resolved;
+            };
+            const resolvedStart=await resolve('start',start,from);if(!resolvedStart)return;
+            const resolvedEnd=await resolve('end',end,to);if(!resolvedEnd)return;
+            if(task.generation!==request.current.generation)return;
+            setScreen({kind:'loading',message:'이동 환경을 살펴보고 우회 경로를 찾고 있어요'});
+            let snapshot = journeySnapshotResponse.parse(await call({ action: 'journey', start:resolvedStart, end:resolvedEnd, profile }, task.controller.signal));
             if (task.generation !== request.current.generation) return;
             request.current.jobId=snapshot.jobId;
             setSelected(snapshot.journey.recommendedId ?? snapshot.journey.routes[0]?.id ?? '');
@@ -119,13 +150,11 @@ export default function Page() {
  <aside className={'sidebar ' + (collapsed ? 'collapsed' : '')+(detailRoute?' show-details':'')}>
  <header className="sidebar-head"><div><h1>길이음<span className="beta">BETA</span></h1><p>나에게 맞는 길로, 일상을 잇다</p></div><button className="icon-button collapse" aria-label="검색 패널 접기" onClick={() => setCollapsed(true)}><PanelLeftClose size={20}/></button></header>
  {!detailRoute && <section className="search-section"><div className="mode-row"><span className="mode active"><Accessibility size={17}/> 편한 길찾기</span><span className="region">보행 · 이동 지원</span></div>
- <div className="locations"><div className="location-row"><span className="location-dot start"/><label className="sr-only" htmlFor="from">출발지</label><input id="from" value={from} onChange={event => { reset(); setFrom(event.target.value); setStart(null); }} onKeyDown={event => event.key === 'Enter' && find('start')}/><button aria-label="출발지 검색" onClick={() => find('start')}><Search size={18}/></button></div>
- <div className="location-row"><span className="location-dot end"/><label className="sr-only" htmlFor="to">도착지</label><input id="to" value={to} onChange={event => { reset(); setTo(event.target.value); setEnd(null); }} onKeyDown={event => event.key === 'Enter' && find('end')}/><button aria-label="도착지 검색" onClick={() => find('end')}><Search size={18}/></button></div><button className="swap" aria-label="출발지와 도착지 바꾸기" onClick={() => { reset(); setFrom(to); setTo(from); setStart(end); setEnd(start); }}><ArrowUpDown size={16}/></button></div>
+ <div className="locations" onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget))closeSearch();}}>{locationInput('start')}{locationInput('end')}<button className="swap" aria-label="출발지와 도착지 바꾸기" onClick={() => { reset(); setFrom(to); setTo(from); setStart(end); setEnd(start); }}><ArrowUpDown size={16}/></button></div>
  <div className="pick-row"><button onClick={() => { reset(); setPick('start'); }}>출발지 지도에서 선택</button><button onClick={() => { reset(); setPick('end'); }}>도착지 지도에서 선택</button></div>
- {searchFor && <div className="search-results"><div className="result-heading">{searchFor === 'start' ? '출발지' : '도착지'} 선택<button aria-label="검색 결과 닫기" onClick={() => { setSearchFor(null); setResults([]); }}><X size={16}/></button></div>{results.map(place => <button key={place.id} className="place-result" onClick={() => choose(place)}><MapPin size={17}/><span><b>{place.name}</b><small>{place.address}</small></span><ChevronRight size={16}/></button>)}</div>}
  <div className="profile-row"><label htmlFor="profile"><Accessibility size={17}/> 이동 수단</label><select id="profile" value={profile} onChange={event => { reset(); setProfile(event.target.value); }}>{['수동 휠체어', '전동 휠체어', '유아차', '보행 보조기'].map(value => <option key={value}>{value}</option>)}</select></div>
  <button className="primary search-button" disabled={busy} onClick={findJourney}><RouteIcon size={19}/> 경로 찾기 <ArrowRight size={18}/></button>
- <div className="location-status">{start ? <><Check size={12}/> 출발지 선택</> : <>출발지를 검색해 주세요</>}<span>·</span>{end ? <><Check size={12}/> 도착지 선택</> : <>도착지를 검색해 주세요</>}</div></section>}
+ <div className="location-status">{start ? <><Check size={12}/> 출발지 선택</> : <>출발지 입력</>}<span>·</span>{end ? <><Check size={12}/> 도착지 선택</> : <>도착지 입력</>}</div></section>}
  {screen.kind === 'error' && <div className="notice" role="alert">{screen.message}</div>}
  {screen.kind === 'result' && analyzing && <div className="progress" role="status"><LoaderCircle size={17} className="spin"/><span>이동 환경을 살펴보고 있어요 · {screen.analysis.checked}/{screen.analysis.total} 지점</span><button onClick={()=>{stopJob();setScreen({...screen,analysis:{...screen.analysis,phase:'canceled'}});}}>중지</button></div>}
  {screen.kind === 'result' && screen.analysis.phase==='failed' && <div className="notice" role="alert">{screen.analysis.message ?? '이동 환경 분석을 완료하지 못했어요. 조회한 경로를 비교해 보세요.'}</div>}
