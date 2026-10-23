@@ -11,7 +11,8 @@ const configSchema = z.object({
 }).superRefine((v, ctx) => {
     if (v.rendererUrl) {
         const u = new URL(v.rendererUrl);
-        if (u.protocol !== 'https:' || u.username || u.password || u.hash || u.search || !v.rendererToken)
+        const local = process.env.NODE_ENV !== 'production' && u.protocol === 'http:' && ['localhost','127.0.0.1'].includes(u.hostname);
+        if ((!local && u.protocol !== 'https:') || u.username || u.password || u.hash || u.search || !v.rendererToken)
             ctx.addIssue({ code: 'custom', message: 'Invalid renderer configuration' });
     }
 });

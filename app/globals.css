@@ -6,3 +6,5 @@
 
 /* Keep the primary controls legible at default browser zoom. */
 .location-row input{font-size:13px}.profile-row,.profile-row select,.primary{font-size:13px}.empty-state>p{font-size:13px}.flow-list b{font-size:13px}.flow-list small{font-size:11px}.subnote{font-size:11px}.finding-body>p{font-size:13px}.settings-intro{font-size:12px}.service-field p,.service-field input,.service-field select{font-size:12px}.evidence-list button{font-size:12px}.evidence-list small{font-size:10px}
+
+.detour-reason{margin:9px 0 5px;font-size:11px;line-height:1.7;color:#557766}

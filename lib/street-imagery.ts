@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { imageInput, MAX_IMAGE_BYTES } from './khu';
-import { meters, type Sample } from './domain';
+import { imageInput, MAX_IMAGE_BYTES } from './khu.ts';
+import { meters, type Sample } from './domain.ts';
 import type { ServerConfig } from './server-config';
 const coordinate = z.tuple([z.number().min(124).max(132), z.number().min(33).max(40)]);
-const source = z.object({ url: z.string().url().refine(value => { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password && ['map.kakao.com', 'kko.to', 'map.naver.com', 'naver.me', 'www.mapillary.com'].includes(u.hostname); }), capturedAt: z.number().min(0).refine(value => value <= Date.now()), coord: coordinate, heading: z.number().min(0).max(360) });
+const source = z.object({ url: z.string().url().refine(value => { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password && ['map.kakao.com', 'kko.to', 'map.naver.com', 'naver.me', 'www.mapillary.com'].includes(u.hostname); }), capturedAt: z.number().min(0).refine(value => value <= Date.now()).nullable(), capturedMonth:z.string().regex(/^20\d{2}-(0[1-9]|1[0-2])$/).optional(), coord: coordinate, heading: z.number().min(0).max(360) });
 const rendered = z.object({ image: imageInput, source });
 export type StreetImage = {
     image: z.infer<typeof imageInput>;
@@ -12,9 +12,10 @@ export type StreetImage = {
 const capture = z.object({ id: z.string(), geometry: z.object({ coordinates: coordinate }), captured_at: z.number(), thumb_1024_url: z.string().url(), compass_angle: z.number().nullable().optional(), is_pano: z.boolean().optional() });
 const captures = z.object({ data: z.array(capture), paging: z.object({ next: z.string().optional() }).optional() });
 export class ImageryServiceError extends Error {
-    constructor(public status:number){super('Imagery service unavailable');}
+    status:number;
+    constructor(status:number){super('Imagery service unavailable');this.status=status;}
 }
-async function checkedFetch(url: string, init: RequestInit, signal: AbortSignal) { const response = await fetch(url, { ...init, redirect: 'manual', cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(12000)]) }); if (!response.ok)
+async function checkedFetch(url: string, init: RequestInit, signal: AbortSignal, timeout = 12000) { const response = await fetch(url, { ...init, redirect: 'manual', cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]) }); if (!response.ok)
     throw new ImageryServiceError(response.status); return response; }
 async function boundedBytes(response: Response, max: number) { const reader = response.body?.getReader(); if (!reader)
     throw new Error('Empty image'); const chunks: Uint8Array[] = []; let size = 0; while (true) {
@@ -50,15 +51,23 @@ async function mapillary(sample: Sample, config: ServerConfig, signal: AbortSign
     const image = imageInput.parse({ mime: response.headers.get('content-type')?.split(';')[0], data: btoa(binary) });
     return { image, source: { url: 'https://www.mapillary.com/app/?pKey=' + encodeURIComponent(candidate.id) + '&focus=photo', capturedAt: candidate.captured_at, coord: candidate.geometry.coordinates, heading: candidate.compass_angle } };
 }
+export function imageIsRecent(source: {capturedAt:number|null;capturedMonth?:string}, now=Date.now()):boolean {
+    let earliest=source.capturedAt;
+    if(earliest===null&&source.capturedMonth){const [year,month]=source.capturedMonth.split('-').map(Number);earliest=Date.UTC(year,month-1,1);}
+    return earliest!==null&&earliest<=now&&now-earliest<=365*86400000;
+}
 export async function streetImage(sample: Sample, config: ServerConfig, signal: AbortSignal): Promise<StreetImage | null> {
     if (config.rendererUrl) {
-        const response = await checkedFetch(config.rendererUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + config.rendererToken, 'Content-Type': 'application/json' }, body: JSON.stringify({ coord: sample.coord, heading: sample.heading }) }, signal);
-        const bytes = await boundedBytes(response, 6 * 1024 * 1024), raw: unknown = JSON.parse(new TextDecoder().decode(bytes));
-        if (raw !== null) {
-            const image = rendered.parse(raw);
-            if (meters(sample.coord, image.source.coord) > 20 || Math.abs(((image.source.heading - sample.heading + 540) % 360) - 180) > 65 || Date.now() - image.source.capturedAt > 365 * 86400000)
-                return null;
-            return image;
+        try {
+            const response = await checkedFetch(config.rendererUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + config.rendererToken, 'Content-Type': 'application/json' }, body: JSON.stringify({ coord: sample.coord, heading: sample.heading }) }, signal, 30000);
+            const bytes = await boundedBytes(response, 6 * 1024 * 1024), raw: unknown = JSON.parse(new TextDecoder().decode(bytes));
+            if (raw !== null) {
+                const image = rendered.parse(raw);
+                if (meters(sample.coord, image.source.coord) <= 20 && Math.abs(((image.source.heading - sample.heading + 540) % 360) - 180) <= 65 && imageIsRecent(image.source)) return image;
+            }
+        } catch (error) {
+            signal.throwIfAborted();
+            if(error instanceof ImageryServiceError && ([401,403,404].includes(error.status) || error.status===429&&!config.mapillary)) throw error;
         }
     }
     return config.mapillary ? mapillary(sample, config, signal) : null;

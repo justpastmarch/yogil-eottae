@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { chromium } from 'playwright';
+import {routeRendererRequest} from './request-policy.mjs';
 import { authorized, captureMonth, parseCapture, parseOrigin, parseState } from './contract.mjs';
 
 const token = process.env.ROADVIEW_RENDERER_TOKEN;
@@ -56,16 +57,7 @@ async function capture(input, signal) {
       viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1, locale: 'ko-KR', serviceWorkers: 'block',
     });
     if (closing || signal.aborted) throw new Error('Capture cancelled');
-    // Inject the private app credential only for this exact origin, never Kakao requests.
-    await context.route('**/*', async route => {
-      const request = route.request();
-      const headers = { ...request.headers() };
-      delete headers['oai-sites-authorization'];
-      if (new URL(request.url()).origin === appOrigin && process.env.ROADVIEW_APP_ACCESS_TOKEN) {
-        headers['oai-sites-authorization'] = `Bearer ${process.env.ROADVIEW_APP_ACCESS_TOKEN}`;
-      }
-      await route.continue({ headers });
-    });
+    await context.route('**/*', route => routeRendererRequest(route, appOrigin, process.env.ROADVIEW_APP_ACCESS_TOKEN));
     const page = await context.newPage();
     page.setDefaultTimeout(20_000);
     page.setDefaultNavigationTimeout(20_000);
@@ -91,7 +83,6 @@ async function capture(input, signal) {
     });
     await page.goto(original.href, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => /20\d{2}년\s*(?:0?[1-9]|1[0-2])월/.test(document.body.innerText), null, { timeout: 6000 }).catch(() => {});
-    // Public URL must retain the selected SDK panorama; never label a redirected view as the requested one.
     if (new URL(page.url()).hostname !== 'map.kakao.com' ||
         new URL(page.url()).searchParams.get('panoid') !== state.panoId) throw new Error('Panorama changed');
     await page.waitForFunction(() => {
@@ -102,7 +93,6 @@ async function capture(input, signal) {
       return [...document.querySelectorAll('canvas')].some(large) ||
         [...document.images].some(image => image.complete && image.naturalWidth > 128 && large(image));
     });
-    // Tile responses and two painted animation frames prevent capturing the initial empty viewer.
     const imageDeadline = Date.now() + 5000;
     while (panoramaImages < 2 && Date.now() < imageDeadline && !signal.aborted) {
       await page.waitForTimeout(100);
@@ -122,7 +112,6 @@ async function capture(input, signal) {
       const ctx = canvas.getContext('2d');
       if (!ctx) return false;
       ctx.drawImage(image, 0, 0);
-      // Examine the central panorama, excluding text, toolbar, and the corner mini-map.
       const { data: pixels } = ctx.getImageData(384, 160, 640, 360);
       let dark = 0;
       const colors = new Set();

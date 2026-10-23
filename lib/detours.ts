@@ -1,7 +1,7 @@
 import { meters, projectOnRoute, samplesFor, type BlockedPassage, type Coord, type Route, type Sample } from './domain.ts';
 
-const SAME_PATH_METERS = 1.5;
-const PASSAGE_METERS = 2;
+const SAME_PATH_METERS = 0.1;
+const PASSAGE_METERS = 0.25;
 
 function lengthOf(coords: Coord[]) {
     return coords.slice(1).reduce((total, coord, i) => total + meters(coords[i], coord), 0);
@@ -34,7 +34,7 @@ export function routeIsDistinct(candidate: Route, accepted: Route[]): boolean {
 }
 
 export function blockedPassageFor(route: Route, sample: Sample): BlockedPassage {
-    const along = projectOnRoute(route.coords, sample.coord)?.along ?? 0;
+    const along = Math.max(0, Math.min(lengthOf(route.coords), sample.along));
     const fromAlong = Math.max(0, along - 15), toAlong = Math.min(lengthOf(route.coords), along + 15);
     const start = pointAt(route.coords, fromAlong), end = pointAt(route.coords, toAlong);
     const coords: Coord[] = start ? [start] : [];

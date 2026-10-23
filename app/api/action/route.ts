@@ -26,7 +26,8 @@ export async function POST(request: Request) {
         return NextResponse.json(data, { headers: { 'Cache-Control': 'no-store' } });
     }
     catch (error) {
-        console.warn('Journey request failed', error instanceof Error ? error.name : 'UnknownError');
+        console.warn('Journey request failed', error instanceof Error ? error.name : 'UnknownError', error && typeof error === 'object' && 'status' in error ? error.status : null);
+        if (import.meta.env.DEV && error instanceof Error) console.warn(error.message.replace(/[A-Za-z0-9_-]{24,}/g,'[redacted]'));
         return NextResponse.json({ error: '길찾기 서비스를 잠시 이용할 수 없습니다. 잠시 후 다시 시도해 주세요.' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
 }

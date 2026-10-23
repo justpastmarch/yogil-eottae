@@ -125,3 +125,16 @@ test('rerouting submits actual ACCESSIBLE waypoints and returns only provider ge
     await assert.rejects(reroute(start, end, config, Array.from({ length: 6 }, () => point(100))));
     assert.equal(requests.length, 3);
 });
+
+test('a separate ramp one meter beside stairs remains a distinct inspectable candidate',()=>{
+    const ramp=route([point(0),point(100,1),point(200,1),point(300)]);
+    assert.equal(routeIsDistinct(ramp,[straight]),true);
+    assert.equal(routeTouchesPassage(ramp,passage),false);
+});
+test('a blocked sample at a later self crossing retains its actual traversal distance',()=>{
+    const crossed=route([point(0),point(300),point(300,-100),point(150,-100),point(150,100)]);
+    const later={...midpoint,coord:point(150),along:650,heading:0};
+    const block=blockedPassageFor(crossed,later);
+    assert.equal(block.fromAlong,635);
+    assert.ok(block.coords.every(c=>Math.abs(c[0]-point(150)[0])<1e-8));
+});
