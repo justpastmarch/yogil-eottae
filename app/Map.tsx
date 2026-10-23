@@ -14,6 +14,8 @@ export default function MapView({routes,selected,evidence,start,end,onPoint,onEv
   const container = useRef<HTMLDivElement>(null);
   const handlers = useRef({onPoint,onEvidence});
   handlers.current = {onPoint,onEvidence};
+  const focusedMarker=useRef<string|null>(null);
+  const fittedGeometry=useRef<{map:KakaoMap;key:string}|null>(null);
   const [session,setSession] = useState<MapSession | null>(null);
   const [failed,setFailed] = useState(false);
   const [retry,setRetry] = useState(0);
@@ -61,6 +63,7 @@ export default function MapView({routes,selected,evidence,start,end,onPoint,onEv
         const colors = {blocked:'#cb514d',clear:'#258464',caution:'#d89c3f',unknown:'#87918e'};
         const dot = document.createElement('button');
         dot.type = 'button';
+        dot.dataset.evidenceId=id;
         dot.setAttribute('aria-label','이 구간의 이동 환경 보기');
         dot.style.cssText = `display:block;width:12px;height:12px;padding:0;border:2px solid white;border-radius:50%;background:${colors[status]};box-shadow:0 1px 4px #0003;`;
         dot.addEventListener('mousedown',() => sdk.event.preventMap(),{signal:events.signal});
@@ -71,6 +74,7 @@ export default function MapView({routes,selected,evidence,start,end,onPoint,onEv
           handlers.current.onEvidence(id);
         },{signal:events.signal});
         overlay(sample.coord,dot,3,.5);
+        if(focusedMarker.current===id)dot.focus({preventScroll:true});
       }
     }
     for (const [place,label,color] of [[start,'출','#176b55'],[end,'도','#343e5a']] satisfies [Place | null,string,string][]) {
@@ -81,7 +85,8 @@ export default function MapView({routes,selected,evidence,start,end,onPoint,onEv
       pin.style.cssText = `display:grid;place-items:center;width:32px;height:32px;border:3px solid white;border-radius:50%;background:${color};color:white;box-shadow:0 3px 10px #0003;font-size:11px;`;
       overlay(place.coord,pin,4,1);
     }
-    return () => { events.abort(); for (const item of overlays) item.setMap(null); };
+    focusedMarker.current=null;
+    return () => { const active=document.activeElement;focusedMarker.current=active instanceof HTMLElement?active.dataset.evidenceId??null:null;events.abort();for(const item of overlays)item.setMap(null); };
   },[session,routes,selected,evidence,start,end]);
 
   useEffect(() => {
@@ -89,6 +94,9 @@ export default function MapView({routes,selected,evidence,start,end,onPoint,onEv
     const {sdk,map} = session;
     const route = routes.find(candidate => candidate.id === selected);
     const points = route?.coords ?? [start?.coord,end?.coord].filter((coord): coord is Coord => coord !== undefined);
+    const key=JSON.stringify(points);
+    if(fittedGeometry.current?.map===map&&fittedGeometry.current.key===key)return;
+    fittedGeometry.current={map,key};
     if (points.length > 1) {
       const bounds = new sdk.LatLngBounds();
       for (const coord of points) bounds.extend(new sdk.LatLng(coord[1],coord[0]));

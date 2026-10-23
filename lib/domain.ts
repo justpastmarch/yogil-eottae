@@ -144,7 +144,10 @@ export function validateFinding(value: unknown): Finding {
     const parsed = findingSchema.safeParse(value);
     if (!parsed.success) throw new Error('AI 응답 형식을 확인할 수 없습니다.');
     const f = parsed.data;
-    const status = !f.pathVisible || f.routeMatch !== 'same-path' ? 'unknown' : f.status;
+    const observable=f.pathVisible&&f.routeMatch==='same-path';
+    const observedFeature=f.features?.stairs.state==='present'||f.features?.incline.state==='present';
+    const status = !observable ? 'unknown' : f.status==='clear'&&observedFeature?'caution':f.status;
+    const reason=f.status==='clear'&&status==='caution'?'계단 또는 경사가 관찰되어 통행 가능 판정을 보류했습니다. '+f.reason:f.reason;
     const unobservable: FeatureObservation = { state: 'unobservable', reason: '사진에서 지정한 이동 통로의 해당 특징을 확인할 수 없습니다.' };
-    return { ...f, ...(f.features && status === 'unknown' ? { features: { stairs: unobservable, incline: unobservable } } : {}), status, reason: f.reason.slice(0, 1000), evidence: f.evidence.slice(0, 8), limitations: f.limitations.slice(0, 8) };
+    return { ...f, ...(f.features && status === 'unknown' ? { features: { stairs: unobservable, incline: unobservable } } : {}), status, reason: reason.slice(0, 1000), evidence: f.evidence.slice(0, 8), limitations: f.limitations.slice(0, 8) };
 }

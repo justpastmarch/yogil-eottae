@@ -74,3 +74,13 @@ test('reserved evidence does not count as checked or clear coverage',()=>{
     assert.equal(summary(route,evidence).unknown,route.samples.length);
     assert.equal(recommendedRoute([route],evidence),null);
 });
+
+test('visible stairs or incline cannot contradict a clear route recommendation',()=>{
+    for(const feature of ['stairs','incline'] as const){
+        const observation={state:'not-observed',reason:'not seen'};
+        const finding=validateFinding({status:'clear',reason:'open path',evidence:[],limitations:[],pathVisible:true,routeMatch:'same-path',features:{stairs:observation,incline:observation,[feature]:{state:'present',reason:'visible feature'}}});
+        assert.equal(finding.status,'caution');
+        const evidence:Record<string,Evidence>=Object.fromEntries(route.samples.map(sample=>['r:'+sample.id,{sampleId:sample.id,status:finding.status,reason:finding.reason,finding,checkedAt:''}]));
+        assert.equal(recommendedRoute([route],evidence),null);
+    }
+});

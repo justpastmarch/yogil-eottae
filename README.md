@@ -5,6 +5,7 @@
 - Kakao 도보 API의 세 가지 모드를 조회하고 중복 경로를 합칩니다. 같은 통로의 장애가 관찰되면 실제 경유지 경로를 다시 조회합니다.
 - 별도 Node 서비스가 Playwright로 실제 거리영상을 캡처합니다. 설치와 실행은 `services/roadview-renderer/README.md`를 따릅니다. Worker 안에서는 브라우저를 실행하지 않습니다.
 - ChatKHU는 이미지 픽셀과 진행 방향을 받아 통로 대응 및 이동 요소를 분석합니다. 현재 기본 모델은 `gemini-3.8-flash`이며 환경 설정으로 변경합니다.
+- 경로별 상세 보기에서 이동 순서대로 계단·경사의 관찰 근거, 판정의 한계, 촬영 시점과 원본 거리영상 링크를 읽습니다. 미분석 지점은 별도로 구분하고 수치 경사도는 미측정으로 표시합니다.
 - D1에는 사용자별 분석 진행 상태를 저장합니다. 각 요청은 한 번의 영상 분석 또는 경로 재탐색을 수행합니다. 작업은 30분 후 접근할 수 없고, 새 작업 생성 시 만료 행을 정리합니다. 이미지와 API 키는 저장하지 않습니다.
 - 모든 지정 지점이 clear이고 관찰된 장애 통로와 겹치지 않는 경로에만 추천 표시를 붙입니다. 사진이 없거나 보행 통로를 식별하지 못하면 통행 가능으로 처리하지 않습니다. 현장 검증을 대체하는 보장은 아닙니다.
 - 최대 경사도 설정과 지형 고도 기반 경사 계산은 아직 구현하지 않았습니다. 사진에서 수치 경사도를 추정하지 않습니다.
@@ -139,3 +140,5 @@ The portable build runs Vinext directly without a host `timeout` command. The ma
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)
 - [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+
+`node scripts/verify-route-details.mjs`는 실행 중인 localhost 앱에서 실제 장소 검색과 영상 AI 분석을 호출해 상세 화면, 지도 초점 유지, 경로 목록 복귀, 모바일 스크롤을 검증합니다. 렌더러 패키지의 Playwright 설치가 필요하며 실제 외부 API 사용량이 발생합니다. 결과는 기본적으로 무시된 `.sites-runtime/route-details/`에 저장합니다.
