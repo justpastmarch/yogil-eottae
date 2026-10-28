@@ -1,8 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {imageInput,parseKhuGeminiResponse,parseKhuClaudeResponse} from '../lib/khu.ts';
+import type {Finding} from '../lib/domain.ts';
 
-const finding={status:'clear',reason:'보행 공간 관찰',evidence:['보도'],limitations:['사진 밖 연결'],pathVisible:true,routeMatch:'same-path',visibility:'visible',reviewReason:'none'};
+const finding={status:'clear',reason:'보행 공간 관찰',evidence:['보도 연결부와 이어지는 포장면'],limitations:[],pathVisible:true,routeMatch:'same-path',visibility:'visible',reviewReason:'none',observation:{connection:'flush',surface:'continuous',uncertainty:'none',target:'sidewalk',reason:'지정 보도의 연결부와 노면이 직접 보임'}} satisfies Finding;
 test('interrupted Gemini response is rejected even when JSON looks complete',()=>{
   assert.throws(()=>parseKhuGeminiResponse({candidates:[{finishReason:'MAX_TOKENS',content:{parts:[{text:JSON.stringify(finding)}]}}]}));
 });
@@ -34,9 +35,44 @@ test('native AI parsers retain structured observations without a numeric grade',
   }
 });
 
-test('new network findings require visibility and occlusion fields while legacy storage remains separate',()=>{
- const {visibility,reviewReason,...legacy}=finding;
- assert.throws(()=>parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(legacy)}]}}]}));
- const result=parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({...finding,visibility:'occluded',reviewReason:'occlusion'})}]}}]});
- assert.equal(result.finding.status,'caution');
+test('both network parsers require visibility, review reason, and structured observation',()=>{
+ const {visibility,reviewReason,observation,...legacy}=finding;
+ for(const raw of [legacy,{...legacy,reviewReason,observation},{...legacy,visibility,observation},{...legacy,visibility,reviewReason}]){
+  const text=JSON.stringify(raw);
+  assert.throws(()=>parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text}]}}]}));
+  assert.throws(()=>parseKhuClaudeResponse({stop_reason:'end_turn',content:[{type:'text',text}],usage:{input_tokens:1,output_tokens:1}}));
+ }
+});
+test('native AI observations distinguish connecting ramps, physical obstacles, and hidden connections',()=>{
+ const cases=[
+  {observation:{...finding.observation,connection:'ramp'},status:'clear'},
+  {observation:{...finding.observation,connection:'stairs'},status:'blocked'},
+  {observation:{...finding.observation,connection:'raised'},status:'blocked'},
+  {observation:{...finding.observation,connection:'unobservable',uncertainty:'framing'},status:'unknown'},
+  {observation:{...finding.observation,connection:'unobservable',uncertainty:'occlusion'},visibility:'occluded',reviewReason:'occlusion',status:'caution'},
+ ];
+ for(const expected of cases){
+  const {status,...observation}=expected;
+  const text=JSON.stringify({...finding,...observation});
+  const results=[
+   parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text}]}}]}),
+   parseKhuClaudeResponse({stop_reason:'end_turn',content:[{type:'text',text}],usage:{input_tokens:1,output_tokens:1}}),
+  ];
+  for(const result of results){
+   assert.equal(result.finding.status,status);
+   assert.deepEqual(result.finding.observation,expected.observation);
+  }
+ }
+});
+test('native AI parsers retain an honest outdoor arrival without inventing a building connection',()=>{
+ const observation={...finding.observation,target:'arrival',connection:'not-applicable',reason:'The requested outdoor endpoint is on the continuous walkway; no building entrance is being assessed.'} satisfies NonNullable<Finding['observation']>;
+ const text=JSON.stringify({...finding,observation});
+ const results=[
+  parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text}]}}]}),
+  parseKhuClaudeResponse({stop_reason:'end_turn',content:[{type:'text',text}],usage:{input_tokens:1,output_tokens:1}}),
+ ];
+ for(const result of results){
+  assert.equal(result.finding.status,'clear');
+  assert.deepEqual(result.finding.observation,observation);
+ }
 });

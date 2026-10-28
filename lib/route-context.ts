@@ -21,7 +21,7 @@ export function pointAt(coords: Coord[], along: number): Coord | undefined {
 
 export function baselineRouteContext({ route, sample, source }: ContextInput): string {
     const step = route.steps.reduce<typeof route.steps[number] | undefined>((nearest, candidate) => !nearest || meters(candidate.coord, sample.coord) < meters(nearest.coord, sample.coord) ? candidate : nearest, undefined);
-    return `진행 방향 ${Math.round(sample.heading)}도. 촬영 방향 ${Math.round(source.heading)}도. 촬영 위치 차이 ${Math.round(meters(sample.coord, source.coord))}m. 경로 좌표 ${JSON.stringify(sample.coord)}. 주변 안내: ${step?.text ?? '보행 이동'}. 지정한 진행 방향의 동일 보행 통로임이 사진에서 명확할 때만 same-path로 판정하라. 옆 건물 입구 계단과 현재 이동 통로를 혼동하지 마라.`;
+    return `요청한 관찰 대상: ${sample.target??'sidewalk'}. arrival은 지도 도착점 노면이며 건물 출입구가 아니다. 횡단 진입부와 반대편 탈출부를 구별하고, entrance는 실제 건물 진입 연결부를 확인한다. 진행 방향 ${Math.round(sample.heading)}도. 촬영 방향 ${Math.round(source.heading)}도. 촬영 위치 차이 ${Math.round(meters(sample.coord, source.coord))}m. 경로 좌표 ${JSON.stringify(sample.coord)}. 주변 안내: ${step?.text ?? '보행 이동'}. 지정한 진행 방향의 동일 보행 통로임이 사진에서 명확할 때만 same-path로 판정하라. 옆 건물 입구 계단과 현재 이동 통로를 혼동하지 마라.`;
 }
 
 export function routeImageContext(input: ContextInput): string {
@@ -40,8 +40,9 @@ export function routeImageContext(input: ContextInput): string {
     const exit = after && meters(sample.coord, after) > 0.5 ? bearing(sample.coord, after) : null;
     const nearby = route.steps.map(step => ({ text: step.text, distanceMeters: rounded(meters(step.coord, sample.coord)) })).filter(step => step.distanceMeters <= 40).sort((a, b) => a.distanceMeters - b.distanceMeters).slice(0, 4);
     return baselineRouteContext(input) + '\n경로 대응 보조 정보: ' + JSON.stringify({
-        camera: { coord: source.coord, headingDegrees: rounded(source.heading) },
+        camera:{coord:source.coord,headingDegrees:rounded(source.heading),tiltDegrees:source.tilt??null,zoom:source.zoom??null},
+        target:{kind:sample.target??'sidewalk',coord:sample.coord,cameraDistanceMeters:rounded(meters(source.coord,sample.coord)),cameraRelativeBearingDegrees:meters(source.coord,sample.coord)<0.5?null:relativeAngle(bearing(source.coord,sample.coord),source.heading)},
         routeTravel: { entryHeadingDegrees: entry === null ? null : rounded(entry), exitHeadingDegrees: exit === null ? null : rounded(exit), turnDegrees: entry === null || exit === null ? null : relativeAngle(exit, entry) },
         positions, nearbyGuidance: nearby,
-    }) + '\nrelativeAlongMeters는 이동 순서상 현재 점의 전후 거리이며 음수는 지나온 방향, 양수는 앞으로 갈 방향이다. cameraRelativeBearingDegrees는 카메라 정면 대비 방위차이며 음수는 왼쪽, 양수는 오른쪽, ±180도는 뒤쪽이다. 이는 지도 좌표의 방위 관계일 뿐 사진 픽셀 위치를 보정한 투영이 아니다. 실제 사진의 교차로·횡단보도·연결부와 대조해 앞으로 이어지는 이동 통로만 관찰하라. 도로 중심선 좌표만으로 좌우 보도나 횡단 위치를 확정하지 마라. 좌표와 안내가 있어도 사진에 그 통로가 보이지 않으면 uncertain이다. 건물 진입 계단은 실제 경로가 그 입구로 이어질 때만 경로 장애로 판단하라. 경로 형상과 단일 영상에서 경사도 수치를 산출하지 마라.';
+    }) + '\nrelativeAlongMeters는 이동 순서상 현재 점의 전후 거리이며 음수는 지나온 방향, 양수는 앞으로 갈 방향이다. cameraRelativeBearingDegrees는 카메라 정면 대비 방위차이며 음수는 왼쪽, 양수는 오른쪽, ±180도는 뒤쪽이다. 이는 지도 좌표의 방위 관계일 뿐 사진 픽셀 위치를 보정한 투영이 아니다. target 좌표는 지도상의 요청 지점이지 사진에서 확인된 보도나 연결부의 위치가 아니다. 실제 사진의 교차로·횡단보도·연결부와 대조해 앞으로 이어지는 이동 통로만 관찰하라. 도로 중심선 좌표만으로 좌우 보도나 횡단 위치를 확정하지 마라. 카메라가 도로를 보고 있어 요청한 보행 통로와의 대응이 불명확하면 uncertain이며, 도로가 평탄하다는 이유로 보도를 clear로 판정하지 마라. 좌표와 안내가 있어도 사진에 그 통로가 보이지 않으면 uncertain이다. 촬영 당시의 관찰만 기술하고 현재 상태라고 단정하지 마라. 건물 진입 계단은 실제 경로가 그 입구로 이어질 때만 경로 장애로 판단하라. 경로 형상과 단일 영상에서 경사도 수치를 산출하지 마라.';
 }

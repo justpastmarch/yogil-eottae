@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { search, geocode } from '@/lib/providers';
-import { startJourney, advanceJourney, cancelJourney } from '@/lib/journey-jobs';
+import {startJourney,readJourney,advanceJourney,cancelJourney,JourneyJobError} from '@/lib/journey-jobs';
 import { routingConfig } from '@/lib/server-config';
 import { requestSchema } from '@/lib/requests';
 export const dynamic = 'force-dynamic';
@@ -21,7 +21,7 @@ export async function POST(request: Request) {
         catch {
             return NextResponse.json({ error: '입력값을 확인해 주세요.' }, { status: 400 });
         }
-        const signal = AbortSignal.any([request.signal, AbortSignal.timeout(85000)]);
+        const signal = AbortSignal.any([request.signal, AbortSignal.timeout(body.action==='advance'?165000:85000)]);
         if (body.action === 'search') return NextResponse.json({places: await (body.address ? geocode : search)(body.query, routingConfig(), signal)}, {headers:{'Cache-Control':'no-store'}});
         const userId = request.headers.get('oai-authenticated-user-id');
         const local = import.meta.env.DEV && ['localhost','127.0.0.1'].includes(new URL(request.url).hostname);
@@ -29,10 +29,12 @@ export async function POST(request: Request) {
         if (!ownerId) return NextResponse.json({error:'로그인 후 길찾기를 이용해 주세요.'},{status:401,headers:{'Cache-Control':'no-store'}});
         const data = body.action === 'journey' ? await startJourney(body, ownerId, signal)
             : body.action === 'advance' ? await advanceJourney(body.jobId, ownerId, signal)
+            : body.action==='status'?await readJourney(body.jobId,ownerId)
             : await cancelJourney(body.jobId, ownerId);
         return NextResponse.json(data, { headers: { 'Cache-Control': 'no-store' } });
     }
     catch (error) {
+        if(error instanceof JourneyJobError)return NextResponse.json({error:error.message},{status:error.status,headers:{'Cache-Control':'no-store'}});
         console.warn('Journey request failed', error instanceof Error ? error.name : 'UnknownError', error && typeof error === 'object' && 'status' in error ? error.status : null);
         return NextResponse.json({ error: '길찾기 서비스를 잠시 이용할 수 없습니다. 잠시 후 다시 시도해 주세요.' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }

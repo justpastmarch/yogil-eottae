@@ -45,6 +45,7 @@ function respond(res, status, body) {
 
 async function capture(input, signal) {
   let context;
+  let stage = 'browser';
   let closing = false;
   const close = () => {
     closing = true;
@@ -61,6 +62,7 @@ async function capture(input, signal) {
     const page = await context.newPage();
     page.setDefaultTimeout(20_000);
     page.setDefaultNavigationTimeout(20_000);
+    stage = 'sdk';
     const sdkUrl = new URL('/internal/roadview', appOrigin);
     sdkUrl.search = new URLSearchParams({ lng: String(input.coord[0]), lat: String(input.coord[1]), heading: String(input.heading) }).toString();
     await page.goto(sdkUrl.href, { waitUntil: 'domcontentloaded' });
@@ -72,9 +74,11 @@ async function capture(input, signal) {
     const state = parseState(JSON.parse(await page.locator('#capture-state').textContent()));
     if (!state) return null;
     const heading = input.target ? targetHeading(state.coord, input.target, state.heading) : state.heading;
+    const tilt=input.tilt??7,zoom=input.zoom??0;
     const original = new URL('https://map.kakao.com/');
     original.search = new URLSearchParams({ map_type: 'TYPE_MAP', map_attribute: 'ROADVIEW', panoid: state.panoId,
-      pan: String(heading), tilt: '-7', zoom: '0' }).toString();
+      pan: String(heading), tilt: String(tilt), zoom: String(zoom) }).toString();
+    stage = 'viewer';
     let panoramaImages = 0;
     page.on('requestfinished', async request => {
       const response = await request.response().catch(() => null);
@@ -94,11 +98,13 @@ async function capture(input, signal) {
       return [...document.querySelectorAll('canvas')].some(large) ||
         [...document.images].some(image => image.complete && image.naturalWidth > 128 && large(image));
     });
+    stage = 'panorama_images';
     const imageDeadline = Date.now() + 5000;
     while (panoramaImages < 2 && Date.now() < imageDeadline && !signal.aborted) {
       await page.waitForTimeout(100);
     }
     if (panoramaImages < 2) throw new Error('Panorama images unavailable');
+    stage = 'screenshot';
     await page.waitForTimeout(500);
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const month = captureMonth(await page.locator('body').innerText());
@@ -125,7 +131,10 @@ async function capture(input, signal) {
     if (!painted) throw new Error('Panorama did not paint');
     return { image: { mime: 'image/jpeg', data: jpeg.toString('base64') },
       source: { capturedAt: null, ...(month ? { capturedMonth: month } : {}),
-        coord: state.coord, heading, panoId:state.panoId, url: original.href } };
+        coord: state.coord, heading,tilt,zoom, panoId:state.panoId, url: original.href } };
+  } catch (error) {
+    if (!signal.aborted) console.error(JSON.stringify({event:'roadview_capture_failed',stage,reason:error instanceof Error && error.name==='TimeoutError'?'timeout':'capture_error'}));
+    throw error;
   } finally {
     signal.removeEventListener('abort', close);
     await context?.close().catch(() => {});
@@ -136,13 +145,13 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') return respond(res, 200, { ok: true });
   if (req.method !== 'POST' || req.url !== '/capture') return respond(res, 404, { error: 'Not found' });
   if (!authorized(req.headers.authorization, token)) return respond(res, 401, { error: 'Unauthorized' });
-  if (active >= 2) return respond(res, 429, { error: 'Renderer busy' });
+  if (active >= 2) { console.warn(JSON.stringify({event:'roadview_capture_busy'})); return respond(res, 429, { error: 'Renderer busy' }); }
   active++;
   const controller = new AbortController();
   const abort = () => { controller.abort(); if (!req.complete) req.destroy(); };
   req.once('aborted', abort);
   res.once('close', abort);
-  const timeout = setTimeout(abort, 30_000);
+  const timeout = setTimeout(() => { console.warn(JSON.stringify({event:'roadview_capture_deadline'})); abort(); }, 30_000);
   try {
     let input;
     try { input = await readBody(req); }

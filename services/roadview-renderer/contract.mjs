@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 
 export function parseCapture(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      !['coord,heading','coord,heading,target'].includes(Object.keys(value).sort().join(',')) ||
+      !Object.keys(value).every(key=>['coord','heading','target','tilt','zoom'].includes(key)) ||
       !Array.isArray(value.coord) || value.coord.length !== 2 ||
       !value.coord.every(Number.isFinite) || !Number.isFinite(value.heading) ||
       Math.abs(value.coord[0]) > 180 || Math.abs(value.coord[1]) > 90 ||
@@ -10,7 +10,9 @@ export function parseCapture(value) {
     throw new Error('Invalid capture request');
   }
   if (Object.hasOwn(value,'target') && (!Array.isArray(value.target) || value.target.length !== 2 || !value.target.every(Number.isFinite) || Math.abs(value.target[0])>180 || Math.abs(value.target[1])>90 || distance(value.coord,value.target)>60)) throw new Error('Invalid capture target');
-  return { coord: value.coord, heading: value.heading, ...(value.target ? {target:value.target}: {}) };
+  if(value.tilt!==undefined&&(!Number.isFinite(value.tilt)||value.tilt< -45||value.tilt>45))throw new Error('Invalid capture tilt');
+  if(value.zoom!==undefined&&(!Number.isInteger(value.zoom)||value.zoom<0||value.zoom>2))throw new Error('Invalid capture zoom');
+  return {coord:value.coord,heading:value.heading,...(value.target?{target:value.target}:{}),...(value.tilt!==undefined?{tilt:value.tilt}:{}),...(value.zoom!==undefined?{zoom:value.zoom}:{})};
 
 }
 

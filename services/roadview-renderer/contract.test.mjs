@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { authorized, captureMonth, parseCapture, parseOrigin, parseState, targetHeading } from './contract.mjs';
 
-test('capture boundary accepts coordinates and heading only', () => {
+test('capture boundary accepts only known camera controls and coordinates', () => {
   assert.deepEqual(parseCapture({coord:[127,37],heading:359.9}), {coord:[127,37],heading:359.9});
   for (const input of [null, {coord:[127,37]}, {coord:[181,37],heading:0}, {coord:[127,37],heading:360},
     {coord:[127,37],heading:0,url:'http://169.254.169.254/'}, {coord:['127',37],heading:0}]) {
@@ -35,4 +35,8 @@ test('target is a bounded coordinate and viewer heading uses actual panorama loc
  assert.ok(targetHeading([127,37],[127,37.0001],90)<1);
  assert.ok(Math.abs(targetHeading([127,37],[127.0001,37],0)-90)<1);
  assert.equal(targetHeading([127,37],[127,37],45),45);
+});
+test('camera recovery permits bounded tilt and zoom without arbitrary viewer inputs',()=>{
+ assert.deepEqual(parseCapture({coord:[127,37],heading:70,tilt:25,zoom:1}),{coord:[127,37],heading:70,tilt:25,zoom:1});
+ for(const camera of [{tilt:-46},{tilt:46},{tilt:'25'},{zoom:-1},{zoom:3},{zoom:.5},{zoom:Infinity},{pan:90}])assert.throws(()=>parseCapture({coord:[127,37],heading:70,...camera}));
 });

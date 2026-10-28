@@ -11,22 +11,31 @@ export interface KakaoMap {
 }
 export interface KakaoOverlay { setMap(map: KakaoMap | null): void }
 export interface KakaoMapClick { latLng: KakaoLatLng }
+export interface KakaoRoadview {
+  setViewpoint(options: { pan: number; tilt: number; zoom: number }): void;
+  setPanoId(panoId: number | string, position: KakaoLatLng): void;
+  relayout(): void;
+}
+export interface KakaoRoadviewClient {
+  getNearestPanoId(position: KakaoLatLng, radius: number, callback: (panoId: number | null) => void): void;
+}
 export interface KakaoMaps {
   load(callback: () => void): void;
   Map: new (container: HTMLElement, options: {center: KakaoLatLng; level: number}) => KakaoMap;
   LatLng: new (latitude: number, longitude: number) => KakaoLatLng;
   LatLngBounds: new () => KakaoBounds;
-  Polyline: new (options: {map: KakaoMap; path: KakaoLatLng[]; strokeWeight: number; strokeColor: string; strokeOpacity: number}) => KakaoOverlay;
+  Polyline: new (options: {map: KakaoMap; path: KakaoLatLng[]; strokeWeight: number; strokeColor: string; strokeOpacity: number; strokeStyle?:'solid'|'shortdash'}) => KakaoOverlay;
   CustomOverlay: new (options: {map: KakaoMap; position: KakaoLatLng; content: HTMLElement; yAnchor: number; zIndex: number}) => KakaoOverlay;
   ZoomControl: new () => object;
   ControlPosition: {BOTTOMRIGHT: number};
+  Roadview?: new (container: HTMLElement) => KakaoRoadview;
+  RoadviewClient?: new () => KakaoRoadviewClient;
   event: {
-    addListener(target: KakaoMap, type: 'click', callback: (event: KakaoMapClick) => void): void;
-    removeListener(target: KakaoMap, type: 'click', callback: (event: KakaoMapClick) => void): void;
+    addListener<T = KakaoMapClick>(target: unknown, type: string, callback: (event: T) => void): void;
+    removeListener<T = KakaoMapClick>(target: unknown, type: string, callback: (event: T) => void): void;
     preventMap(): void;
   };
 }
-
 declare global { interface Window { kakao?: {maps: KakaoMaps} } }
 
 const mapConfigSchema = z.object({javascriptKey: z.string().regex(/^[a-zA-Z0-9_-]+$/).max(256)});

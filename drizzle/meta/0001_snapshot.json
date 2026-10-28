@@ -1,0 +1,66 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "26ab1863-3a7e-4f23-b159-585d7d6fa350",
+  "prevId": "2cf88543-0a8c-4030-9df2-ae6958c6427f",
+  "tables": {
+    "journey_jobs": {
+      "name": "journey_jobs",
+      "columns": {
+        "id": {"name":"id","type":"text","primaryKey":true,"notNull":true,"autoincrement":false},
+        "owner_id": {"name":"owner_id","type":"text","primaryKey":false,"notNull":true,"autoincrement":false},
+        "state": {"name":"state","type":"text","primaryKey":false,"notNull":true,"autoincrement":false},
+        "phase": {"name":"phase","type":"text","primaryKey":false,"notNull":true,"autoincrement":false},
+        "revision": {"name":"revision","type":"integer","primaryKey":false,"notNull":true,"autoincrement":false,"default":0},
+        "lease_token": {"name":"lease_token","type":"text","primaryKey":false,"notNull":false,"autoincrement":false},
+        "lease_until": {"name":"lease_until","type":"integer","primaryKey":false,"notNull":true,"autoincrement":false,"default":0},
+        "expires_at": {"name":"expires_at","type":"integer","primaryKey":false,"notNull":true,"autoincrement":false},
+        "updated_at": {"name":"updated_at","type":"integer","primaryKey":false,"notNull":true,"autoincrement":false}
+      },
+      "indexes": {"journey_jobs_expiry":{"name":"journey_jobs_expiry","columns":["expires_at"],"isUnique":false}},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "journey_captures": {
+      "name": "journey_captures",
+      "columns": {
+        "id": {"name":"id","type":"text","primaryKey":true,"notNull":true,"autoincrement":false},
+        "job_id": {"name":"job_id","type":"text","primaryKey":false,"notNull":true,"autoincrement":false},
+        "evidence_id": {"name":"evidence_id","type":"text","primaryKey":false,"notNull":true,"autoincrement":false},
+        "view_id": {"name":"view_id","type":"text","primaryKey":false,"notNull":true,"autoincrement":false},
+        "source": {"name":"source","type":"text","primaryKey":false,"notNull":true,"autoincrement":false},
+        "mime": {"name":"mime","type":"text","primaryKey":false,"notNull":true,"autoincrement":false},
+        "byte_length": {"name":"byte_length","type":"integer","primaryKey":false,"notNull":true,"autoincrement":false},
+        "created_at": {"name":"created_at","type":"integer","primaryKey":false,"notNull":true,"autoincrement":false}
+      },
+      "indexes": {"journey_captures_job":{"name":"journey_captures_job","columns":["job_id","created_at"],"isUnique":false}},
+      "foreignKeys": {
+        "journey_captures_job_id_journey_jobs_id_fk": {"name":"journey_captures_job_id_journey_jobs_id_fk","tableFrom":"journey_captures","tableTo":"journey_jobs","columnsFrom":["job_id"],"columnsTo":["id"],"onDelete":"cascade","onUpdate":"no action"}
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "journey_capture_parts": {
+      "name": "journey_capture_parts",
+      "columns": {
+        "capture_id": {"name":"capture_id","type":"text","primaryKey":false,"notNull":true,"autoincrement":false},
+        "part_index": {"name":"part_index","type":"integer","primaryKey":false,"notNull":true,"autoincrement":false},
+        "bytes": {"name":"bytes","type":"blob","primaryKey":false,"notNull":true,"autoincrement":false}
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "journey_capture_parts_capture_id_journey_captures_id_fk": {"name":"journey_capture_parts_capture_id_journey_captures_id_fk","tableFrom":"journey_capture_parts","tableTo":"journey_captures","columnsFrom":["capture_id"],"columnsTo":["id"],"onDelete":"cascade","onUpdate":"no action"}
+      },
+      "compositePrimaryKeys": {"journey_capture_parts_capture_id_part_index_pk":{"columns":["capture_id","part_index"],"name":"journey_capture_parts_capture_id_part_index_pk"}},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {"schemas":{},"tables":{},"columns":{}},
+  "internal": {"indexes":{}}
+}

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { meters, samplesFor, type Coord, type Place, type Route } from './domain.ts';
+import { meters, samplesFor, placeSchema, type Coord, type Place, type Route } from './domain.ts';
 import { routeIsDistinct } from './detours.ts';
 import type { RoutingConfig } from './server-config.ts';
 import * as tmap from './tmap-providers.ts';
@@ -7,7 +7,7 @@ export { ServiceError } from './tmap-providers.ts';
 import { ServiceError } from './tmap-providers.ts';
 const coordinate = z.tuple([z.coerce.number().min(124).max(132), z.coerce.number().min(33).max(40)]);
 const location = z.object({ x:z.coerce.number().min(124).max(132), y:z.coerce.number().min(33).max(40) });
-const places = z.object({documents:z.array(location.extend({id:z.string(),place_name:z.string(),address_name:z.string(),road_address_name:z.string().optional()}))});
+const places = z.object({documents:z.array(location.extend({id:z.string(),place_name:z.string(),address_name:z.string(),road_address_name:z.string().optional(),phone:z.unknown().optional(),place_url:z.unknown().optional()}))});
 const addresses = z.object({documents:z.array(location.extend({address_name:z.string(),road_address:z.object({address_name:z.string()}).nullable().optional()}))});
 const step = z.object({properties:location.extend({guidance:z.string(),distance:z.number().nonnegative(),time:z.number().nonnegative()}),path:z.object({points:z.array(coordinate).min(1)})});
 const walking = z.discriminatedUnion('status',[
@@ -22,7 +22,12 @@ async function kakao(path:string, params:URLSearchParams, restKey:string, signal
 export async function search(query:string, config:RoutingConfig, signal?:AbortSignal):Promise<Place[]> {
     if(config.kind==='tmap') return tmap.search(query,{tmap:config.apiKey},signal);
     const result=places.parse(await kakao('local/search/keyword.json',new URLSearchParams({query,size:'8'}),config.restKey,signal));
-    return result.documents.map(p=>({id:p.id,name:p.place_name,address:p.road_address_name||p.address_name,coord:[p.x,p.y]}));
+    return result.documents.map(p=>{
+        const phone=placeSchema.shape.phone.safeParse(typeof p.phone==='string'?p.phone.trim()||undefined:undefined);
+        const placeUrl=typeof p.place_url==='string'?p.place_url.replace(/^http:\/\//,'https://'):undefined;
+        const validUrl=placeSchema.shape.placeUrl.safeParse(placeUrl);
+        return {id:p.id,name:p.place_name,address:p.road_address_name||p.address_name,coord:[p.x,p.y],...(phone.success&&phone.data?{phone:phone.data}:{}),...(validUrl.success&&validUrl.data?.endsWith('/'+p.id)?{placeUrl:validUrl.data}:{})};
+    });
 }
 export async function geocode(query:string, config:RoutingConfig, signal?:AbortSignal):Promise<Place[]> {
     if(config.kind==='tmap') return tmap.geocode(query,{tmap:config.apiKey},signal);

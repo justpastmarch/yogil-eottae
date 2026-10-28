@@ -1,16 +1,16 @@
 'use client';
 import {useEffect,useRef,useState} from 'react';
-import type {Coord,Evidence,Place,Route} from '@/lib/domain';
+import type {Coord,Place,Route,RouteAssessments} from '@/lib/domain';
 import {loadKakaoMaps,type KakaoMap,type KakaoMaps,type KakaoOverlay} from '@/lib/kakao-map-sdk';
 
 type Props = {
-  routes: Route[]; selected: string; evidence: Record<string,Evidence>;
+  routes: Route[]; selected: string; activeId:string; assessments: RouteAssessments;
   start: Place | null; end: Place | null;
   onPoint: (point: Coord) => void; onEvidence: (id: string) => void; focus: Coord | null;
 };
 type MapSession = {sdk: KakaoMaps; map: KakaoMap};
 
-export default function MapView({routes,selected,evidence,start,end,onPoint,onEvidence,focus}: Props) {
+export default function MapView({routes,selected,activeId,assessments,start,end,onPoint,onEvidence,focus}: Props) {
   const container = useRef<HTMLDivElement>(null);
   const handlers = useRef({onPoint,onEvidence});
   handlers.current = {onPoint,onEvidence};
@@ -19,6 +19,7 @@ export default function MapView({routes,selected,evidence,start,end,onPoint,onEv
   const [session,setSession] = useState<MapSession | null>(null);
   const [failed,setFailed] = useState(false);
   const [retry,setRetry] = useState(0);
+  const [legendOpen,setLegendOpen]=useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -55,17 +56,22 @@ export default function MapView({routes,selected,evidence,start,end,onPoint,onEv
     };
     for (const route of [...routes].sort((a,b) => Number(a.id === selected) - Number(b.id === selected))) {
       const active = route.id === selected;
-      overlays.push(new sdk.Polyline({map,path:route.coords.map(point),strokeColor:active ? '#176b55' : '#8192b1',strokeWeight:active ? 7 : 5,strokeOpacity:active ? 1 : .6}));
+      overlays.push(new sdk.Polyline({map,path:route.coords.map(point),strokeColor:'#8b95a3',strokeWeight:active ? 7 : 5,strokeOpacity:active ? 1 : .6,strokeStyle:route.graphSegment?'shortdash':'solid'}));
       if (!active) continue;
-      for (const sample of route.samples) {
-        const id = route.id + ':' + sample.id;
-        const status = evidence[id]?.status ?? 'unknown';
-        const colors = {blocked:'#cb514d',clear:'#258464',caution:'#d89c3f',unknown:'#87918e'};
+      for(const sample of assessments[route.id]?.decision?.issues??[]){
+        const id=sample.id,status=sample.status;
+        const providerRestriction=status==='blocked'&&sample.source==='provider';
+        const colors = {blocked:'#e53e3e',clear:'#258464',caution:'#dd6b20',unknown:'#a0aec0'};
+        const sizes = {blocked:18,clear:14,caution:14,unknown:10};
+        const needsAttention=status==='unknown'&&(sample.source!=='coverage'||route.samples.some(point=>point.id===sample.sampleId&&point.critical));
+        const size = needsAttention?16:sizes[status];
         const dot = document.createElement('button');
         dot.type = 'button';
         dot.dataset.evidenceId=id;
-        dot.setAttribute('aria-label','이 구간의 이동 환경 보기');
-        dot.style.cssText = `display:block;width:12px;height:12px;padding:0;border:2px solid white;border-radius:50%;background:${colors[status]};box-shadow:0 1px 4px #0003;`;
+        dot.setAttribute('aria-label',`${Math.round(sample.along)}m · ${providerRestriction?'길찾기의 계단 안내 · 영상으로 확인한 장애 아님':sample.source==='service'?'처리 실패':status==='blocked'?'영상에서 장애 확인 · 우회 필요':status==='caution'?'확인된 주의 요소':status==='clear'?'이동 통로 관찰':'추가 확인 필요'} · ${sample.reason}`);
+        dot.setAttribute('aria-pressed',String(activeId===id));
+        dot.style.cssText = `display:grid;place-items:center;width:${size}px;height:${size}px;padding:0;border:${status === 'blocked' ? '3px' : '2px'} solid white;border-radius:50%;background:${providerRestriction?'#a16207':colors[status]};box-shadow:${activeId===id?'0 0 0 4px #163f76, 0 2px 6px #0004':'0 2px 6px #0004'};color:white;font-weight:bold;font-size:10px;cursor:pointer;`;
+        if (status === 'blocked') dot.textContent = providerRestriction?'계':'!';
         dot.addEventListener('mousedown',() => sdk.event.preventMap(),{signal:events.signal});
         dot.addEventListener('touchstart',() => sdk.event.preventMap(),{signal:events.signal,passive:true});
         dot.addEventListener('click',event => {
@@ -73,7 +79,8 @@ export default function MapView({routes,selected,evidence,start,end,onPoint,onEv
           sdk.event.preventMap();
           handlers.current.onEvidence(id);
         },{signal:events.signal});
-        overlay(sample.coord,dot,3,.5);
+        const priority=status==='blocked'?(providerRestriction?9:10):status==='caution'?8:needsAttention?7:status==='clear'?6:2;
+        overlay(sample.coord,dot,priority,.5);
         if(focusedMarker.current===id)dot.focus({preventScroll:true});
       }
     }
@@ -87,13 +94,13 @@ export default function MapView({routes,selected,evidence,start,end,onPoint,onEv
     }
     focusedMarker.current=null;
     return () => { const active=document.activeElement;focusedMarker.current=active instanceof HTMLElement?active.dataset.evidenceId??null:null;events.abort();for(const item of overlays)item.setMap(null); };
-  },[session,routes,selected,evidence,start,end]);
+  },[session,routes,selected,activeId,assessments,start,end]);
 
   useEffect(() => {
     if (!session) return;
     const {sdk,map} = session;
     const route = routes.find(candidate => candidate.id === selected);
-    const points = route?.coords ?? [start?.coord,end?.coord].filter((coord): coord is Coord => coord !== undefined);
+    const points = route?.graphSegment?[...route.coords,...[start?.coord,end?.coord].filter((coord):coord is Coord=>coord!==undefined)]:route?.coords ?? [start?.coord,end?.coord].filter((coord): coord is Coord => coord !== undefined);
     const key=JSON.stringify(points);
     if(fittedGeometry.current?.map===map&&fittedGeometry.current.key===key)return;
     fittedGeometry.current={map,key};
@@ -114,5 +121,22 @@ export default function MapView({routes,selected,evidence,start,end,onPoint,onEv
     }
   },[session,focus]);
 
-  return <><div className="map" ref={container} aria-label="확대·축소하고 출발지와 도착지를 선택할 수 있는 지도"/>{failed && <div className="tile-error" role="alert">지도를 불러오지 못했습니다. <button type="button" onClick={() => setRetry(value => value + 1)}>다시 시도</button></div>}</>;
+  return (
+    <>
+      <div className="map" ref={container} aria-label="확대·축소하고 출발지와 도착지를 선택할 수 있는 지도"/>
+      {failed && <div className="tile-error" role="alert">지도를 불러오지 못했습니다. <button type="button" onClick={() => setRetry(value => value + 1)}>다시 시도</button></div>}
+      <aside className="map-legend-card" aria-label="통행 환경 상태 범례">
+        <div className="legend-head">통행 상태 범례</div>
+        <button type="button" className="legend-toggle" aria-expanded={legendOpen} aria-controls="map-legend-entries" onClick={()=>setLegendOpen(value=>!value)}>통행 상태 범례 {legendOpen?'접기':'보기'}</button>
+        <div id="map-legend-entries" className={'legend-entries'+(legendOpen?' is-open':'')}>
+        <div className="legend-row"><span className="legend-badge clear"/> 이동 통로 관찰</div>
+        <div className="legend-row"><span className="legend-badge caution"/> 확인된 주의 요소</div>
+        <div className="legend-row"><span className="legend-badge provider">계</span> 길찾기의 계단 안내 · 영상 미확인</div>
+        <div className="legend-row"><span className="legend-badge blocked">!</span> 영상에서 장애 확인 · 우회 필요</div>
+        <div className="legend-row"><span className="legend-badge unknown"/> 미확인 또는 처리 대기</div>
+        <div className="legend-row">회색 선은 경로 표시이며 지점 사이 통행을 확인한 뜻이 아닙니다.</div>
+        </div>
+      </aside>
+    </>
+  );
 }
