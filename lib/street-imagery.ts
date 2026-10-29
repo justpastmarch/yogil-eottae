@@ -13,7 +13,7 @@ const capture = z.object({ id: z.string(), geometry: z.object({ coordinates: coo
 const captures = z.object({ data: z.array(capture), paging: z.object({ next: z.string().optional() }).optional() });
 export class ImageryServiceError extends Error {
     status:number;
-    constructor(status:number){super('Imagery service unavailable');this.status=status;}
+    constructor(status:number,message='Imagery service unavailable'){super(message);this.status=status;}
 }
 async function waitForRetry(ms:number,signal:AbortSignal):Promise<void>{
     signal.throwIfAborted();
@@ -24,7 +24,7 @@ async function waitForRetry(ms:number,signal:AbortSignal):Promise<void>{
     if(signal.aborted)abort();
     await promise;
 }
-async function checkedFetch<T>(url:string,init:RequestInit,signal:AbortSignal,consume:(response:Response)=>Promise<T>,timeout=12000,service:'renderer'|'mapillary'|'kartaview'='mapillary'):Promise<T>{
+async function checkedFetch<T>(url:string,init:RequestInit,signal:AbortSignal,consume:(response:Response)=>Promise<T>,timeout=12000,service:'renderer'|'mapillary'|'kartaview'|'google'='mapillary'):Promise<T>{
     for(let attempt=0;attempt<3;attempt++){
         let failure:unknown;
         try{
@@ -58,6 +58,53 @@ async function boundedBytes(response: Response, max: number) { const reader = re
     bytes.set(chunk, offset);
     offset += chunk.length;
 } return bytes; }
+const googleMetadata=z.object({
+    status:z.string(),
+    pano_id:z.string().trim().min(1).optional(),
+    location:z.object({lat:z.number().finite(),lng:z.number().finite()}).optional(),
+    date:z.unknown().optional(),
+});
+async function googleStreetView(sample:Sample,config:ServerConfig,signal:AbortSignal,options:{target?:Coord;tilt?:number;zoom?:number}):Promise<StreetImage|null>{
+    const key=config.googleStreetViewKey?.trim();
+    if(!key)throw new ImageryServiceError(401,'Google Street View API key is missing');
+    const request=(url:URL,max:number)=>checkedFetch(url.href,{},signal,async response=>({bytes:await boundedBytes(response,max),mime:response.headers.get('content-type')?.split(';')[0].trim().toLowerCase()}),12000,'google');
+    try{
+        const metadataUrl=new URL('https://maps.googleapis.com/maps/api/streetview/metadata');
+        metadataUrl.search=new URLSearchParams({location:`${sample.coord[1]},${sample.coord[0]}`,radius:'20',source:'outdoor',key}).toString();
+        const metadata=await checkedFetch(metadataUrl.href,{},signal,async response=>{
+            const data=googleMetadata.parse(JSON.parse(new TextDecoder().decode(await boundedBytes(response,64*1024))));
+            if(data.status==='OVER_QUERY_LIMIT'||data.status==='OVER_DAILY_LIMIT')throw new ImageryServiceError(429,'Google Street View quota exceeded');
+            if(data.status==='UNKNOWN_ERROR')throw new ImageryServiceError(502,'Google Street View metadata error');
+            return data;
+        },12000,'google');
+        if(metadata.status==='ZERO_RESULTS')return null;
+        if(metadata.status!=='OK'){
+            const status=metadata.status==='REQUEST_DENIED'?403:metadata.status==='OVER_QUERY_LIMIT'||metadata.status==='OVER_DAILY_LIMIT'?429:502;
+            throw new ImageryServiceError(status,status===403?'Google Street View request denied':status===429?'Google Street View quota exceeded':'Google Street View metadata error');
+        }
+        const location=metadata.location;
+        const coord=location&&coordinate.safeParse([location.lng,location.lat]);
+        if(!metadata.pano_id||!coord?.success)throw new ImageryServiceError(502,'Invalid Google Street View metadata');
+        if(meters(sample.coord,coord.data)>20)return null;
+        const heading=options.target&&meters(coord.data,options.target)>0.5?bearing(coord.data,options.target):sample.heading;
+        const params=new URLSearchParams({size:'640x640',pano:metadata.pano_id,heading:String(heading),return_error_code:'true',key});
+        if(options.tilt!==undefined)params.set('pitch',String(-options.tilt));
+        if(options.zoom!==undefined)params.set('fov',String(Math.min(120,180/2**options.zoom)));
+        const imageUrl=new URL('https://maps.googleapis.com/maps/api/streetview');
+        imageUrl.search=params.toString();
+        const {bytes,mime}=await request(imageUrl,MAX_IMAGE_BYTES);
+        let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
+        const image=imageInput.parse({mime,data:btoa(binary)});
+        const link=new URL('https://www.google.com/maps/@');
+        link.search=new URLSearchParams({api:'1',map_action:'pano',viewpoint:`${coord.data[1]},${coord.data[0]}`,pano:metadata.pano_id,heading:String(heading),...(options.tilt!==undefined?{pitch:String(-options.tilt)}:{})}).toString();
+        const month=typeof metadata.date==='string'&&/^20\d{2}-(0[1-9]|1[0-2])$/.test(metadata.date)&&metadata.date<=new Date().toISOString().slice(0,7)?metadata.date:undefined;
+        return {image,source:{url:link.href,capturedAt:null,...(month?{capturedMonth:month}:{}),coord:coord.data,heading,panoId:metadata.pano_id,...(options.tilt!==undefined?{tilt:-options.tilt}:{}),...(options.zoom!==undefined?{zoom:options.zoom}:{})}};
+    }catch(error){
+        signal.throwIfAborted();
+        if(error instanceof ImageryServiceError)throw error;
+        throw new ImageryServiceError(502,'Google Street View service error');
+    }
+}
 async function mapillary(sample: Sample, config: ServerConfig, signal: AbortSignal): Promise<StreetImage | null> {
     const [x, y] = sample.coord, dy = 25 / 111320, dx = dy / Math.cos(y * Math.PI / 180);
     const params = new URLSearchParams({ fields: 'id,geometry,captured_at,thumb_1024_url,compass_angle,is_pano', bbox: [x - dx, y - dy, x + dx, y + dy].join(','), limit: '2000' });
@@ -106,17 +153,20 @@ async function kartaview(sample:Sample,signal:AbortSignal,options:{target?:Coord
     const month=selected.photo.shotDate?.match(/^(20\d{2}-(?:0[1-9]|1[0-2]))/u)?.[1];
     return {image,source:{url:`https://kartaview.org/details/${selected.photo.sequenceId}/${selected.photo.sequenceIndex}`,capturedAt:null,...(month?{capturedMonth:month}:{}),coord:selected.coord,heading:selected.photo.heading}};
 }
-export async function streetImage(sample: Sample, config: ServerConfig, signal: AbortSignal, options: {target?:Coord;tilt?:number;zoom?:number} = {}): Promise<StreetImage | null> {
+export async function streetImage(sample: Sample, config: ServerConfig, signal: AbortSignal, options: {target?:Coord;tilt?:number;zoom?:number;purpose?:'place-entrance'|'route'} = {}): Promise<StreetImage | null> {
+    const {purpose,...viewpoint}=options;
+    const maxCameraDistance=purpose==='place-entrance'?60:20;
     const deadline=AbortSignal.any([signal,AbortSignal.timeout(90000)]);
+    if(config.imageryProvider==='google')return googleStreetView(sample,config,deadline,options);
     if(config.imageryProvider==='kartaview')return kartaview(sample,deadline,options);
     if (config.rendererUrl) {
         try {
-            const raw:unknown=await checkedFetch(config.rendererUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + config.rendererToken, 'Content-Type': 'application/json' }, body: JSON.stringify({coord:sample.coord,heading:sample.heading,...options}) },deadline,async response=>JSON.parse(new TextDecoder().decode(await boundedBytes(response,6*1024*1024))),30000,'renderer');
+            const raw:unknown=await checkedFetch(config.rendererUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + config.rendererToken, 'Content-Type': 'application/json' }, body: JSON.stringify({coord:sample.coord,heading:sample.heading,...viewpoint}) },deadline,async response=>JSON.parse(new TextDecoder().decode(await boundedBytes(response,6*1024*1024))),30000,'renderer');
             if (raw !== null) {
                 const image = rendered.parse(raw);
                 const expectedHeading = options.target && meters(image.source.coord, options.target) > 0.5 ? bearing(image.source.coord, options.target) : sample.heading;
                 const viewpointMatches=(options.tilt===undefined||image.source.tilt===options.tilt)&&(options.zoom===undefined||image.source.zoom===options.zoom);
-                if(viewpointMatches&&meters(sample.coord,image.source.coord)<=20&&Math.abs(((image.source.heading-expectedHeading+540)%360)-180)<=65)return image;
+                if(viewpointMatches&&meters(sample.coord,image.source.coord)<=maxCameraDistance&&Math.abs(((image.source.heading-expectedHeading+540)%360)-180)<=65)return image;
             }
         } catch (error) {
             signal.throwIfAborted();

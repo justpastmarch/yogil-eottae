@@ -96,7 +96,7 @@ try{
  try{
   await racePage.goto(base,{waitUntil:'networkidle'});await racePage.locator('.search-button').click();
   await statusEntered.promise;
-  await racePage.getByRole('status').filter({hasText:'분석이 중지됐습니다'}).waitFor({timeout:10000});
+  await racePage.locator('.notice[role="status"]').waitFor({timeout:10000});
   assert.equal(await racePage.getByRole('button',{name:'중지',exact:true}).count(),0,'A held status poll must not hide a completed advance result');
   await racePage.screenshot({path:output+'/held-status-terminal.png'});
  }finally{
@@ -117,7 +117,7 @@ try{
  });
  try{
   await stopRacePage.goto(base,{waitUntil:'networkidle'});
-  await stopRacePage.locator('#profile').selectOption({label:'유아차'});
+  assert.equal(await stopRacePage.locator('#profile').count(),0,'Mobility-profile selection is outside the requested product scope');
   await stopRacePage.locator('.search-button').click();
   const stop=stopRacePage.getByRole('button',{name:'중지',exact:true});await stop.waitFor({timeout:30000});
   await stop.focus();await stop.press('Enter');
@@ -132,7 +132,7 @@ try{
     break;
    }
   }
-  assert.equal(previewChecked,true,'Stroller walking preview must remain explicitly non-accessibility guidance');
+  assert.equal(previewChecked,true,'Walking preview must remain explicitly non-accessibility guidance');
   await stopRacePage.screenshot({path:output+'/stop-completion-race.png'});
  }finally{releaseStopAdvance.resolve();await stopRacePage.close();}
  const previewPage=await browser.newPage({viewport:{width:1440,height:900}}),releasePreview=Promise.withResolvers();
@@ -171,6 +171,6 @@ try{
   await previewPage.close();
  }
  assert.deepEqual(errors,[]);
- const result={kind:'Live search and routing, browser-injected held requests, 503, synthetic terminal and recommendation responses and location permission denial; no AI inference',initialCancellation:true,inputsPreserved:true,priorCandidates:before,mobileResultsHeight:list.height,mobileMapHeight:map.height,locationDenialPreservesResults:true,failedRetryPreservesResults:true,transientStatusFailures:statusFailures,terminalAdvanceWinsHeldStatus:true,syntheticTerminalStopRaceFocus:true,strollerPreviewWarning:true,previewStaysPreview:true,keyboardActiveOptionVisible:true,shortViewportDetailHeight:detail.height,stopFocusRestored:true,collapsibleLegend:true,zoom:'CSS 200% approximation',errors};
+ const result={kind:'Live search and routing, browser-injected held requests, 503, synthetic terminal and recommendation responses and location permission denial; no AI inference',initialCancellation:true,inputsPreserved:true,priorCandidates:before,mobileResultsHeight:list.height,mobileMapHeight:map.height,locationDenialPreservesResults:true,failedRetryPreservesResults:true,transientStatusFailures:statusFailures,terminalAdvanceWinsHeldStatus:true,syntheticTerminalStopRaceFocus:true,stopRacePreviewWarning:true,previewStaysPreview:true,keyboardActiveOptionVisible:true,shortViewportDetailHeight:detail.height,stopFocusRestored:true,collapsibleLegend:true,zoom:'CSS 200% approximation',errors};
  await writeFile(output+'/result.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result));
 }finally{releaseJourney.resolve();releaseAdvance.resolve();await context.close();await browser.close();}

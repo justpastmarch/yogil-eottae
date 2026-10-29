@@ -143,10 +143,9 @@ export function buildPedestrianGraph(input: unknown): PedestrianGraph {
       for(const directionName of ['forward','backward'] as const){
         if(directionName==='forward'&&direction==='-1'||directionName==='backward'&&['yes','1','true'].includes(direction??''))continue;
         const foot=way.tags[`foot:${directionName}`]??way.tags.foot??way.tags[`access:${directionName}`]??way.tags.access??'';
-        if(DENIED[foot])continue;
         const wheelchair=way.tags[`wheelchair:${directionName}`]??way.tags.wheelchair;
         const blockedNodes=first.tags?.wheelchair==='no'||second.tags?.wheelchair==='no'||['stile','turnstile','kissing_gate'].includes(first.tags?.barrier??'')||['stile','turnstile','kissing_gate'].includes(second.tags?.barrier??'');
-        const access=kind==='steps'||wheelchair==='no'||blockedNodes?'blocked':'unknown';
+        const access=DENIED[foot]||kind==='steps'||wheelchair==='no'||blockedNodes?'blocked':'unknown';
         edges.push({id:`${way.id}:${i}:${directionName}`,from:directionName==='forward'?from:to,to:directionName==='forward'?to:from,length,wayId:way.id,kind,access});
       }
     }

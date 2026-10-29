@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {imageInput,parseKhuGeminiResponse,parseKhuClaudeResponse} from '../lib/khu.ts';
+import {imageInput,parseKhuGeminiResponse,parseKhuClaudeResponse,analyzeKhuImage,analyzeKhuViews,KhuError} from '../lib/khu.ts';
 import type {Finding} from '../lib/domain.ts';
 
 const finding={status:'clear',reason:'보행 공간 관찰',evidence:['보도 연결부와 이어지는 포장면'],limitations:[],pathVisible:true,routeMatch:'same-path',visibility:'visible',reviewReason:'none',observation:{connection:'flush',surface:'continuous',uncertainty:'none',target:'sidewalk',reason:'지정 보도의 연결부와 노면이 직접 보임'}} satisfies Finding;
@@ -75,4 +75,34 @@ test('native AI parsers retain an honest outdoor arrival without inventing a bui
   assert.equal(result.finding.status,'clear');
   assert.deepEqual(result.finding.observation,observation);
  }
+});
+
+test('malformed and truncated provider outputs explain the cause without accepting a finding',()=>{
+ assert.throws(()=>parseKhuGeminiResponse({candidates:[{finishReason:'MAX_TOKENS'}]}),error=>error instanceof KhuError&&error.message.includes('길이 제한')&&error.details?.finishReason==='MAX_TOKENS');
+ assert.throws(()=>parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify([finding])}]}}]}),error=>error instanceof KhuError&&error.details?.schemaPaths?.includes('응답 루트')===true);
+ assert.throws(()=>parseKhuGeminiResponse({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({...finding,observation:{...finding.observation,connection:'unknown'}})}]}}]}),error=>error instanceof KhuError&&error.details?.schemaPaths?.includes('observation.connection')===true);
+});
+
+test('provider HTTP failures retain status without disclosing provider payload or retrying authentication',async t=>{
+ let calls=0;
+ t.mock.method(globalThis,'fetch',async()=>{calls++;return new Response('private provider payload',{status:401});});
+ await assert.rejects(analyzeKhuImage({apiKey:'private-key',model:'gemini-test',image:{mime:'image/png',data:'iVBORw0KGgo='},profile:'수동 휠체어'}),error=>error instanceof KhuError&&error.status===401&&error.details?.httpStatus===401&&!error.message.includes('private'));
+ assert.equal(calls,1);
+});
+
+test('Gemini single and joint analysis request object-shaped observation contracts',async t=>{
+ const required:string[][]=[];
+ t.mock.method(globalThis,'fetch',async(_input:unknown,init?:RequestInit)=>{
+  const body=JSON.parse(String(init?.body)),schema=body.generationConfig.responseSchema;
+  assert.equal(schema.type,'OBJECT');
+  required.push(schema.required);
+  const text=JSON.stringify(schema.properties.finding?{finding,views:[{id:'view-1',sameCorridor:true,targetPatchVisible:true,observation:'목표 연결부'}],supportIds:['view-1'],originalConnectionVisible:true}:finding);
+  return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text}]}}]});
+ });
+ const image={mime:'image/png',data:'iVBORw0KGgo='} satisfies Parameters<typeof analyzeKhuImage>[0]['image'];
+ assert.equal((await analyzeKhuImage({apiKey:'test',model:'gemini-test',image,profile:'수동 휠체어'})).finding.status,'clear');
+ const joint=await analyzeKhuViews({apiKey:'test',model:'gemini-test',views:[{id:'view-1',image}],profile:'수동 휠체어',context:'',signal:new AbortController().signal});
+ assert.equal(joint.review.finding.status,'clear');
+ assert.ok(required[0].includes('observation'));
+ assert.ok(required[1].includes('finding'));
 });

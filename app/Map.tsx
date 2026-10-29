@@ -7,13 +7,14 @@ type Props = {
   routes: Route[]; selected: string; activeId:string; assessments: RouteAssessments;
   start: Place | null; end: Place | null;
   onPoint: (point: Coord) => void; onEvidence: (id: string) => void; focus: Coord | null;
+  gradeThreshold?: number; onFocus?: (coord:Coord)=>void;
 };
 type MapSession = {sdk: KakaoMaps; map: KakaoMap};
 
-export default function MapView({routes,selected,activeId,assessments,start,end,onPoint,onEvidence,focus}: Props) {
+export default function MapView({routes,selected,activeId,assessments,start,end,onPoint,onEvidence,focus,gradeThreshold=8,onFocus}: Props) {
   const container = useRef<HTMLDivElement>(null);
-  const handlers = useRef({onPoint,onEvidence});
-  handlers.current = {onPoint,onEvidence};
+  const handlers = useRef({onPoint,onEvidence,onFocus});
+  handlers.current = {onPoint,onEvidence,onFocus};
   const focusedMarker=useRef<string|null>(null);
   const fittedGeometry=useRef<{map:KakaoMap;key:string}|null>(null);
   const [session,setSession] = useState<MapSession | null>(null);
@@ -58,9 +59,21 @@ export default function MapView({routes,selected,activeId,assessments,start,end,
       const active = route.id === selected;
       overlays.push(new sdk.Polyline({map,path:route.coords.map(point),strokeColor:'#8b95a3',strokeWeight:active ? 7 : 5,strokeOpacity:active ? 1 : .6,strokeStyle:route.graphSegment?'shortdash':'solid'}));
       if (!active) continue;
+      if(route.grade&&route.grade.status!=='unavailable')for(const segment of route.grade.segments){
+        const steep=Math.abs(segment.gradePercent)>=gradeThreshold;
+        overlays.push(new sdk.Polyline({map,path:segment.coords.map(point),strokeColor:steep?'#9f1239':'#0f766e',strokeWeight:9,strokeOpacity:.85,strokeStyle:segment.gradePercent<0?'shortdash':'solid'}));
+      }
+      for(const [index,sample] of route.samples.filter(item=>item.target==='crossing-entry').sort((a,b)=>a.along-b.along).entries()){
+        const badge=document.createElement('button');
+        badge.type='button';badge.textContent=`횡단 ${index+1}`;
+        badge.className='crossing-map-label';
+        badge.setAttribute('aria-label',`횡단 진입점 ${index+1}, 출발 후 ${Math.round(sample.along)}m, 지도 위치`);
+        badge.addEventListener('click',event=>{event.stopPropagation();sdk.event.preventMap();handlers.current.onFocus?.(sample.coord);},{signal:events.signal});
+        overlay(sample.coord,badge,5,1.8);
+      }
       for(const sample of assessments[route.id]?.decision?.issues??[]){
         const id=sample.id,status=sample.status;
-        const providerRestriction=status==='blocked'&&sample.source==='provider';
+        const providerRestriction=status==='blocked'&&(sample.source==='provider'||sample.source==='osm');
         const colors = {blocked:'#e53e3e',clear:'#258464',caution:'#dd6b20',unknown:'#a0aec0'};
         const sizes = {blocked:18,clear:14,caution:14,unknown:10};
         const needsAttention=status==='unknown'&&(sample.source!=='coverage'||route.samples.some(point=>point.id===sample.sampleId&&point.critical));
@@ -68,10 +81,10 @@ export default function MapView({routes,selected,activeId,assessments,start,end,
         const dot = document.createElement('button');
         dot.type = 'button';
         dot.dataset.evidenceId=id;
-        dot.setAttribute('aria-label',`${Math.round(sample.along)}m · ${providerRestriction?'길찾기의 계단 안내 · 영상으로 확인한 장애 아님':sample.source==='service'?'처리 실패':status==='blocked'?'영상에서 장애 확인 · 우회 필요':status==='caution'?'확인된 주의 요소':status==='clear'?'이동 통로 관찰':'추가 확인 필요'} · ${sample.reason}`);
+        dot.setAttribute('aria-label',`${Math.round(sample.along)}m · ${providerRestriction?(sample.source==='osm'?'보행망 지도의 계단·접근 제한 · 영상 판독 아님':'길찾기의 계단 안내 · 영상으로 확인한 장애 아님'):sample.source==='service'?'처리 실패':status==='blocked'?'영상에서 장애 확인 · 우회 필요':status==='caution'?'확인된 주의 요소':status==='clear'?'이동 통로 관찰':'추가 확인 필요'} · ${sample.reason}`);
         dot.setAttribute('aria-pressed',String(activeId===id));
         dot.style.cssText = `display:grid;place-items:center;width:${size}px;height:${size}px;padding:0;border:${status === 'blocked' ? '3px' : '2px'} solid white;border-radius:50%;background:${providerRestriction?'#a16207':colors[status]};box-shadow:${activeId===id?'0 0 0 4px #163f76, 0 2px 6px #0004':'0 2px 6px #0004'};color:white;font-weight:bold;font-size:10px;cursor:pointer;`;
-        if (status === 'blocked') dot.textContent = providerRestriction?'계':'!';
+        if (status === 'blocked') dot.textContent = providerRestriction?(sample.source==='osm'?'지':'계'):'!';
         dot.addEventListener('mousedown',() => sdk.event.preventMap(),{signal:events.signal});
         dot.addEventListener('touchstart',() => sdk.event.preventMap(),{signal:events.signal,passive:true});
         dot.addEventListener('click',event => {
@@ -94,7 +107,7 @@ export default function MapView({routes,selected,activeId,assessments,start,end,
     }
     focusedMarker.current=null;
     return () => { const active=document.activeElement;focusedMarker.current=active instanceof HTMLElement?active.dataset.evidenceId??null:null;events.abort();for(const item of overlays)item.setMap(null); };
-  },[session,routes,selected,activeId,assessments,start,end]);
+  },[session,routes,selected,activeId,assessments,start,end,gradeThreshold]);
 
   useEffect(() => {
     if (!session) return;
@@ -126,14 +139,16 @@ export default function MapView({routes,selected,activeId,assessments,start,end,
       <div className="map" ref={container} aria-label="확대·축소하고 출발지와 도착지를 선택할 수 있는 지도"/>
       {failed && <div className="tile-error" role="alert">지도를 불러오지 못했습니다. <button type="button" onClick={() => setRetry(value => value + 1)}>다시 시도</button></div>}
       <aside className="map-legend-card" aria-label="통행 환경 상태 범례">
-        <div className="legend-head">통행 상태 범례</div>
         <button type="button" className="legend-toggle" aria-expanded={legendOpen} aria-controls="map-legend-entries" onClick={()=>setLegendOpen(value=>!value)}>통행 상태 범례 {legendOpen?'접기':'보기'}</button>
         <div id="map-legend-entries" className={'legend-entries'+(legendOpen?' is-open':'')}>
         <div className="legend-row"><span className="legend-badge clear"/> 이동 통로 관찰</div>
         <div className="legend-row"><span className="legend-badge caution"/> 확인된 주의 요소</div>
-        <div className="legend-row"><span className="legend-badge provider">계</span> 길찾기의 계단 안내 · 영상 미확인</div>
+        <div className="legend-row"><span className="legend-badge provider">계/지</span> 경로·보행망 지도 제한 · 영상 판독 아님</div>
         <div className="legend-row"><span className="legend-badge blocked">!</span> 영상에서 장애 확인 · 우회 필요</div>
         <div className="legend-row"><span className="legend-badge unknown"/> 미확인 또는 처리 대기</div>
+        <div className="legend-row">경사 색선 · 30m 지형고도 기반 추정</div>
+        <div className="legend-row"><span className="legend-badge" style={{background:'#9f1239'}}/> 절대 경사 {gradeThreshold}% 이상 · 통행 불가 판정 아님</div>
+        <div className="legend-row">실선 오르막 · 점선 내리막 · 횡단 번호는 지도 위치</div>
         <div className="legend-row">회색 선은 경로 표시이며 지점 사이 통행을 확인한 뜻이 아닙니다.</div>
         </div>
       </aside>

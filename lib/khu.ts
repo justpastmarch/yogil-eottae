@@ -36,9 +36,29 @@ const geminiResponse = z.object({
     usageMetadata: z.object({ promptTokenCount: z.number().optional(), candidatesTokenCount: z.number().optional(), thoughtsTokenCount: z.number().optional() }).optional(), billing: billing.optional(),
 });
 const claudeResponse = z.object({ stop_reason: z.string().nullable().optional(), content: z.array(z.object({ type: z.string(), text: z.string().optional() })), usage: z.object({ input_tokens: z.number(), output_tokens: z.number() }), billing: billing.optional() });
+type FailureDetails={stage:'request'|'response'|'finding'|'joint';httpStatus?:number;finishReason?:string;schemaPaths?:string[]};
 export class KhuError extends Error {
-    status: number;
-    constructor(message: string, status = 502) { super(message); this.status = status; }
+    readonly status:number;
+    readonly details?:FailureDetails;
+    constructor(message:string,status=502,details?:FailureDetails){super(message);this.status=status;this.details=details;}
+}
+function schemaFailure(error:z.ZodError,stage:FailureDetails['stage']):KhuError {
+    const schemaPaths=error.issues.slice(0,4).map(issue=>issue.path.join('.')||'응답 루트');
+    return new KhuError('이미지 분석 응답의 필수 관찰 필드가 올바르지 않습니다 ('+schemaPaths.join(', ')+').',502,{stage,schemaPaths});
+}
+function interruptedResponse(finishReason:string|undefined):KhuError {
+    const reason=finishReason&&/^[A-Za-z_]{1,40}$/.test(finishReason)?finishReason:'unknown';
+    return new KhuError(reason==='MAX_TOKENS'||reason==='max_tokens'?'이미지 분석 응답이 길이 제한으로 중단되었습니다.':'이미지 분석 응답이 정상 완료되지 않았습니다 ('+reason+').',502,{stage:'response',finishReason:reason});
+}
+export function khuFailureReason(error:unknown,stage:'initial'|'review'):string {
+    const detail=error instanceof KhuError?error.details:undefined;
+    console.warn(JSON.stringify({event:'route_image_analysis_failed',stage,providerStage:detail?.stage,status:error instanceof KhuError?detail?.httpStatus??error.status:undefined,finishReason:detail?.finishReason,schemaPaths:detail?.schemaPaths}));
+    if(error instanceof KhuError)return error.message+(detail?.stage==='request'?' (HTTP '+(detail.httpStatus??error.status)+')':'');
+    if(error instanceof Error&&error.name==='TimeoutError')return '이미지 분석 응답 대기 시간이 초과되었습니다. 다시 시도해 주세요.';
+    if(error instanceof z.ZodError)return schemaFailure(error,'response').message;
+    if(error instanceof SyntaxError)return '이미지 분석 서비스가 올바른 JSON 응답을 보내지 않았습니다.';
+    if(error instanceof TypeError)return '이미지 분석 서비스에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.';
+    return '이미지 분석 처리 중 오류가 발생했습니다. 다시 시도해 주세요.';
 }
 async function request(path: string, apiKey: string, body?: unknown, signal?: AbortSignal) {
     const response = await fetch(GATEWAY + path, {
@@ -48,13 +68,14 @@ async function request(path: string, apiKey: string, body?: unknown, signal?: Ab
     });
     if (!response.ok) {
         const message = response.status === 401 || response.status === 403 ? 'ChatKHU 키 또는 모델 사용 권한을 확인해 주세요.'
-            : response.status === 402 ? 'ChatKHU의 사용 가능한 크레딧을 확인해 주세요.'
+            : response.status === 402 ? '분석 서비스 크레딧이 부족합니다.'
                 : response.status === 429 ? 'ChatKHU 호출 한도에 도달했습니다. 잠시 후 다시 시도해 주세요.'
                     : response.status === 404 ? '이 계정에서 해당 모델 또는 호출 경로를 사용할 수 없습니다.'
                         : 'ChatKHU 요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.';
-        throw new KhuError(message, response.status >= 400 && response.status < 500 ? response.status : 502);
+        throw new KhuError(message, response.status >= 400 && response.status < 500 ? response.status : 502,{stage:'request',httpStatus:response.status});
     }
-    return response.json();
+    try{return await response.json();}
+    catch{throw new KhuError('이미지 분석 서비스가 올바른 JSON 응답을 보내지 않았습니다.',502,{stage:'response'});}
 }
 export async function listKhuModels({ apiKey }: {
     apiKey: string;
@@ -76,24 +97,41 @@ features.stairs와 incline의 state는 present, not-observed(관찰 가능한 �
 visibility는 visible, occluded, unobservable이다. reviewReason은 framing, occlusion, corridor-uncertain, none이며 uncertainty와 모순되지 않게 답한다. routeMatch는 same-path, uncertain, different-path다.
 JSON만 반환하라: {"status":"clear|caution|blocked|unknown","reason":"관찰 근거","evidence":["보이는 내용"],"limitations":["확인 범위 밖"],"pathVisible":true,"routeMatch":"same-path|uncertain|different-path","visibility":"visible|occluded|unobservable","reviewReason":"framing|occlusion|corridor-uncertain|none","observation":{"connection":"flush|ramp|raised|stairs|unobservable|not-applicable","surface":"continuous|uneven|unpaved|unobservable","uncertainty":"none|framing|occlusion|corridor","target":"${observationSchema.shape.target.options.join('|')}","reason":"목표의 관찰 근거"},"features":{"stairs":{"state":"present|not-observed|unobservable","reason":"근거"},"incline":{"state":"present|not-observed|unobservable","reason":"근거"}}}`;
 const currentFindingSchema=findingSchema.extend({visibility:z.enum(['visible','occluded','unobservable']),reviewReason:z.enum(['framing','occlusion','corridor-uncertain','none']),observation:observationSchema});
+const modelFindingSchema={
+    type:'OBJECT',required:['status','reason','evidence','limitations','pathVisible','routeMatch','visibility','reviewReason','observation','features'],
+    properties:{
+        status:{type:'STRING',enum:findingSchema.shape.status.options},reason:{type:'STRING'},
+        evidence:{type:'ARRAY',items:{type:'STRING'}},limitations:{type:'ARRAY',items:{type:'STRING'}},pathVisible:{type:'BOOLEAN'},
+        routeMatch:{type:'STRING',enum:['same-path','uncertain','different-path']},
+        visibility:{type:'STRING',enum:currentFindingSchema.shape.visibility.options},reviewReason:{type:'STRING',enum:currentFindingSchema.shape.reviewReason.options},
+        observation:{type:'OBJECT',required:Object.keys(observationSchema.shape),properties:Object.fromEntries(Object.entries(observationSchema.shape).map(([key,field])=>[key,{type:'STRING',...(field instanceof z.ZodEnum?{enum:field.options}:{})}]))},
+        features:{type:'OBJECT',required:['stairs','incline'],properties:Object.fromEntries(['stairs','incline'].map(key=>[key,{type:'OBJECT',required:['state','reason'],properties:{state:{type:'STRING',enum:['present','not-observed','unobservable']},reason:{type:'STRING'}}}]))},
+    },
+};
 function findingFromText(text: string) {
-    try {
-        return validateFinding(currentFindingSchema.parse(JSON.parse(text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, ''))));
-    }
-    catch {
-        throw new KhuError('이미지 응답을 판정 형식으로 읽지 못했습니다. 결과를 통행 판정에 사용하지 않았습니다.');
-    }
+    let value:unknown;
+    try{value=JSON.parse(text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, ''));}
+    catch{throw new KhuError('이미지 분석 결과의 JSON 문법이 올바르지 않습니다.',502,{stage:'finding'});}
+    const parsed=currentFindingSchema.safeParse(value);
+    if(!parsed.success)throw schemaFailure(parsed.error,'finding');
+    return validateFinding(parsed.data);
+}
+function geminiData(value:unknown){
+    const parsed=geminiResponse.safeParse(value);
+    if(!parsed.success)throw schemaFailure(parsed.error,'response');
+    const candidate=parsed.data.candidates?.[0];
+    if(candidate?.finishReason!=='STOP')throw interruptedResponse(candidate?.finishReason);
+    return {data:parsed.data,text:candidate.content?.parts.filter(part=>!part.thought).map(part=>part.text??'').join('')??''};
 }
 export function parseKhuGeminiResponse(value: unknown) {
-    const data = geminiResponse.parse(value), candidate = data.candidates?.[0];
-    if (candidate?.finishReason !== 'STOP')
-        throw new KhuError('AI가 분석을 정상 완료하지 못했습니다. 중단된 응답은 판정에 사용하지 않습니다.');
-    return { finding: findingFromText(candidate.content?.parts.filter(p => !p.thought).map(p => p.text || '').join('') || ''), usage: { input: data.usageMetadata?.promptTokenCount || 0, output: (data.usageMetadata?.candidatesTokenCount || 0) + (data.usageMetadata?.thoughtsTokenCount || 0) }, billing: data.billing };
+    const {data,text}=geminiData(value);
+    return { finding: findingFromText(text), usage: { input: data.usageMetadata?.promptTokenCount || 0, output: (data.usageMetadata?.candidatesTokenCount || 0) + (data.usageMetadata?.thoughtsTokenCount || 0) }, billing: data.billing };
 }
 export function parseKhuClaudeResponse(value: unknown) {
-    const data = claudeResponse.parse(value);
-    if (data.stop_reason !== 'end_turn')
-        throw new KhuError('AI가 분석을 정상 완료하지 못했습니다. 중단된 응답은 판정에 사용하지 않습니다.');
+    const parsed=claudeResponse.safeParse(value);
+    if(!parsed.success)throw schemaFailure(parsed.error,'response');
+    const data=parsed.data;
+    if(data.stop_reason!=='end_turn')throw interruptedResponse(data.stop_reason??undefined);
     return { finding: findingFromText(data.content.filter(p => p.type === 'text').map(p => p.text || '').join('')), usage: { input: data.usage.input_tokens, output: data.usage.output_tokens }, billing: data.billing };
 }
 export async function analyzeKhuImage({ apiKey, model, image, profile, context = '', signal }: {
@@ -107,7 +145,7 @@ export async function analyzeKhuImage({ apiKey, model, image, profile, context =
     const prompt = instruction + '\n이동 기준: ' + profile + '\n' + context;
     const result = model.startsWith('claude-')
         ? parseKhuClaudeResponse(await request('/claude/v1/messages/', apiKey, { model, max_tokens: 2048, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: image.mime, data: image.data } }, { type: 'text', text: prompt }] }] }, signal))
-        : parseKhuGeminiResponse(await request('/gemini/v1beta/models/'+encodeURIComponent(model)+':generateContent',apiKey,{contents:[{role:'user',parts:[{text:prompt},{inlineData:{mimeType:image.mime,data:image.data}}]}],generationConfig:{responseMimeType:'application/json',maxOutputTokens:8192,...(model==='gemini-3.8-flash'?{thinkingConfig:{thinkingLevel:'low'}}:{})}},signal));
+        : parseKhuGeminiResponse(await request('/gemini/v1beta/models/'+encodeURIComponent(model)+':generateContent',apiKey,{contents:[{role:'user',parts:[{text:prompt},{inlineData:{mimeType:image.mime,data:image.data}}]}],generationConfig:{responseMimeType:'application/json',responseSchema:modelFindingSchema,maxOutputTokens:8192,...(model==='gemini-3.8-flash'?{thinkingConfig:{thinkingLevel:'low'}}:{})}},signal));
     return { model, checkedAt: new Date().toISOString(), ...result };
 }
 
@@ -117,6 +155,13 @@ export const jointFindingSchema = z.object({
     supportIds: z.array(z.string()).max(3),
     originalConnectionVisible: z.boolean(),
 });
+const modelJointSchema={
+    type:'OBJECT',required:Object.keys(jointFindingSchema.shape),properties:{
+        finding:modelFindingSchema,
+        views:{type:'ARRAY',minItems:1,maxItems:3,items:{type:'OBJECT',required:['id','sameCorridor','targetPatchVisible','observation'],properties:{id:{type:'STRING'},sameCorridor:{type:'BOOLEAN'},targetPatchVisible:{type:'BOOLEAN'},observation:{type:'STRING'}}}},
+        supportIds:{type:'ARRAY',maxItems:3,items:{type:'STRING'}},originalConnectionVisible:{type:'BOOLEAN'},
+    },
+};
 export type JointFinding = z.infer<typeof jointFindingSchema>;
 export function validateJointFinding(value:unknown, allowedIds:string[], independentSupportIds:string[],recoveryReason:'framing'|'occlusion'|'corridor-uncertain'='occlusion'):JointFinding {
     const parsed=jointFindingSchema.parse(value);
@@ -137,16 +182,20 @@ export async function analyzeKhuViews({apiKey,model,views,profile,context,signal
     const prompt=observationalRules+'\n이동 기준: '+profile+'\n'+context+`\n여러 사진에서 동일한 목표 연결부를 대조한다. 회전 사진은 새 촬영 위치가 아니다. 화각 부족만 해결한 경우 같은 파노라마의 회전 사진으로 목표를 확인할 수 있다. 차량 뒤 가림은 다른 촬영점에서 그 연결부가 실제로 드러나야 한다. 다른 평탄한 통로를 목표의 근거로 쓰지 않는다. 확인된 동일 통로 장애를 다른 사진으로 지우지 않는다. 여러 촬영 월로 현재 차량 유무를 추정하지 않는다.
 반환 JSON의 finding은 위 관찰 필드 전체와 observation을 포함한다. views에는 각 사진의 id, sameCorridor:boolean, targetPatchVisible:boolean, observation:string을 기록한다. supportIds는 원래 목표를 실제로 보여주는 사진 ID만 포함한다. originalConnectionVisible은 원래 목표의 연결을 직접 볼 수 있는지다.
 JSON만 반환한다: {"finding":${example},"views":[{"id":"사진 ID","sameCorridor":true,"targetPatchVisible":true,"observation":"목표 근거"}],"supportIds":["사진 ID"],"originalConnectionVisible":true}`;
-    let raw:unknown;
+    let text:string;
     if(model.startsWith('claude-')) {
-        const data=claudeResponse.parse(await request('/claude/v1/messages/',apiKey,{model,max_tokens:4096,messages:[{role:'user',content:[{type:'text',text:prompt},...views.flatMap(view=>[{type:'text',text:'사진 ID: '+view.id},{type:'image',source:{type:'base64',media_type:view.image.mime,data:view.image.data}}])]}]},signal));
-        if(data.stop_reason!=='end_turn')throw new KhuError('연속 영상 분석이 중단되었습니다.');
-        raw=JSON.parse(data.content.filter(part=>part.type==='text').map(part=>part.text??'').join('').trim().replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));
+        const parsed=claudeResponse.safeParse(await request('/claude/v1/messages/',apiKey,{model,max_tokens:4096,messages:[{role:'user',content:[{type:'text',text:prompt},...views.flatMap(view=>[{type:'text',text:'사진 ID: '+view.id},{type:'image',source:{type:'base64',media_type:view.image.mime,data:view.image.data}}])]}]},signal));
+        if(!parsed.success)throw schemaFailure(parsed.error,'response');
+        if(parsed.data.stop_reason!=='end_turn')throw interruptedResponse(parsed.data.stop_reason??undefined);
+        text=parsed.data.content.filter(part=>part.type==='text').map(part=>part.text??'').join('');
     } else {
-        const data=geminiResponse.parse(await request('/gemini/v1beta/models/'+encodeURIComponent(model)+':generateContent',apiKey,{contents:[{role:'user',parts:[{text:prompt},...views.flatMap(view=>[{text:'사진 ID: '+view.id},{inlineData:{mimeType:view.image.mime,data:view.image.data}}])]}],generationConfig:{responseMimeType:'application/json',maxOutputTokens:8192,...(model==='gemini-3.8-flash'?{thinkingConfig:{thinkingLevel:'low'}}:{})}},signal));
-        const candidate=data.candidates?.[0];
-        if(candidate?.finishReason!=='STOP')throw new KhuError('연속 영상 분석이 중단되었습니다.');
-        raw=JSON.parse(candidate.content?.parts.filter(part=>!part.thought).map(part=>part.text??'').join('')??'');
+        const result=geminiData(await request('/gemini/v1beta/models/'+encodeURIComponent(model)+':generateContent',apiKey,{contents:[{role:'user',parts:[{text:prompt},...views.flatMap(view=>[{text:'사진 ID: '+view.id},{inlineData:{mimeType:view.image.mime,data:view.image.data}}])]}],generationConfig:{responseMimeType:'application/json',responseSchema:modelJointSchema,maxOutputTokens:8192,...(model==='gemini-3.8-flash'?{thinkingConfig:{thinkingLevel:'low'}}:{})}},signal));
+        text=result.text;
     }
-    return {review:jointFindingSchema.parse(raw),checkedAt:new Date().toISOString()};
+    let raw:unknown;
+    try{raw=JSON.parse(text.trim().replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));}
+    catch{throw new KhuError('사진 공동 분석 결과의 JSON 문법이 올바르지 않습니다.',502,{stage:'joint'});}
+    const parsed=jointFindingSchema.safeParse(raw);
+    if(!parsed.success)throw schemaFailure(parsed.error,'joint');
+    return {review:parsed.data,checkedAt:new Date().toISOString()};
 }

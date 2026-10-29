@@ -6,8 +6,11 @@ import RouteDetails from './RouteDetails';
 import DestinationInfo from './DestinationInfo';
 import TransitJourney from './TransitJourney';
 import StationFacilityInfo from './StationFacilityInfo';
+import PlaceEntrance from './PlaceEntrance';
+import RouteTerrain from './RouteTerrain';
+import {orderByRoutePreference} from '@/lib/route-grade';
 import type {Coord,Place,JourneyResult,JourneyGoal,RouteDecision} from '@/lib/domain';
-import {hasOnlyProviderBarriers,rankRoutes} from '@/lib/domain';
+import {hasOnlyProviderBarriers} from '@/lib/domain';
 import {journeySnapshotResponse,searchResponse,type JourneySnapshotResponse} from '@/lib/requests';
 import type {CapturePreview} from '@/lib/capture-contract';
 type ResultScreen = {
@@ -21,6 +24,13 @@ type LocationField = 'start' | 'end';
 type LocationSearch = {field:LocationField;kind:'loading'} | {field:LocationField;kind:'results';places:Place[]} | {field:LocationField;kind:'error';message:string};
 const normalizedPlaceName = (value:string) => value.replace(/\s+/g,'').toLowerCase();
 const decisionLabels:Record<RouteDecision['kind'],string>={recommended:'영상 기준 추천',conditional:'조건부 후보',detour:'우회 필요',hold:'추천 보류'};
+function routeHeadline(decision:RouteDecision):string{
+    const point=decision.issues.find(issue=>issue.status==='blocked')??decision.issues.find(issue=>issue.source==='geometry'||issue.source==='service')??decision.issues.find(issue=>issue.status==='unknown');
+    if(!point)return decision.kind==='recommended'?'필수 연결부 관찰 완료':decision.kind==='conditional'?'일부 구간 미확인 · 조건 보기':'경로 확인 중';
+    const location=`${Math.round(point.along)}m 지점`;
+    if(point.status==='blocked')return `${location} · ${point.source==='provider'?'지도 계단 안내':point.source==='osm'?'보행망 지도 접근 제한':'사진에서 장애 관찰'}`;
+    return `${location} · ${point.source==='geometry'?'지도 경로와 연결 미확인':point.source==='service'?'사진 처리 미완료':'연결부 사진 미확인'}`;
+}
 function stopWaitingForResult(journey:JourneyResult,message:string):JourneyResult{
     const assessments=Object.fromEntries(Object.entries(journey.assessments).map(([id,assessment])=>{
         const decision=assessment.decision;
@@ -36,9 +46,12 @@ function stopWaitingForResult(journey:JourneyResult,message:string):JourneyResul
     return {...journey,assessments};
 }
 export default function Page() {
-    const [screen,setScreen]=useState<Screen>({kind:'idle'}),[profile,setProfile]=useState('수동 휠체어');
+    const [screen,setScreen]=useState<Screen>({kind:'idle'});
+    const profile='수동 휠체어';
+    const [preference,setPreference]=useState<'gentle'|'fast'>('gentle');
+    const [gradeThreshold,setGradeThreshold]=useState(8);
     const [goal,setGoal]=useState<JourneyGoal>('arrival');
-    const [imageryProvider,setImageryProvider]=useState<'configured'|'kartaview'>('configured');
+    const [imageryProvider,setImageryProvider]=useState<'configured'|'kartaview'|'google'>('configured');
     const [from, setFrom] = useState('수원시 영통구 영통동 992-1'), [to, setTo] = useState('경희대학교 국제캠퍼스 학생회관');
     const [start, setStart] = useState<Place | null>(null), [end, setEnd] = useState<Place | null>(null);
     const [locationSearch,setLocationSearch]=useState<LocationSearch|null>(null),[focusedField,setFocusedField]=useState<LocationField|null>(null),[highlighted,setHighlighted]=useState(-1);
@@ -71,13 +84,22 @@ export default function Page() {
     useEffect(()=>{
         if(screen.kind!=='result'||screen.analysis.phase==='running'||explicitRouteSelection.current)return;
         const {journey}=screen;
-        const candidate=journey.recommendedId??rankRoutes(journey.routes,journey.evidence).find(route=>{
+        const ordered=orderByRoutePreference(journey.routes,preference);
+        const candidate=ordered.find(route=>journey.assessments[route.id]?.decision.kind==='recommended')??ordered.find(route=>{
             const assessment=journey.assessments[route.id];
             return !route.graphSegment&&assessment?.decision.kind==='conditional'&&!assessment.blockedPassageIds.length&&!assessment.decision.issues.some(issue=>issue.status==='blocked');
-        })?.id;
-        if(candidate)setSelected(candidate);
-    },[screen]);
+        });
+        if(candidate)setSelected(candidate.id);
+    },[screen,preference]);
     const journey = screen.kind === 'result' ? screen.journey : null, routes = journey?.routes ?? [], evidence = journey?.evidence ?? {}, route = routes.find(r => r.id === selected), analyzing = screen.kind === 'result' && screen.analysis.phase === 'running', busy = screen.kind === 'loading' || analyzing;
+    const routeProcessingFailed=Object.values(evidence).some(item=>item.failure==='analysis'||item.failure==='service'||item.failure==='capture'||!!item.review?.failure);
+    const routeFailureNotice=routeProcessingFailed||screen.kind==='result'&&screen.analysis.phase==='failed';
+    const orderedRoutes=orderByRoutePreference(routes,preference);
+    function choosePreference(value:'gentle'|'fast'){
+        setPreference(value);
+        const candidate=orderByRoutePreference(routes.filter(item=>!item.graphSegment&&journey?.assessments[item.id]?.decision.kind!=='detour'),value)[0];
+        if(candidate)selectRoute(candidate.id);
+    }
     const routeDecision=route?journey?.assessments[route.id]?.decision:undefined;
     const visibleIssues=(routeDecision?.issues??[]).filter(issue=>issue.status!=='clear'&&(!analyzing||issue.source!=='coverage'||!!evidence[issue.id]&&evidence[issue.id].stage!=='reserved'));
     const keyIssues=visibleIssues.filter(issue=>issue.status==='blocked'||issue.source==='provider'||issue.source==='geometry'||issue.source==='osm'||route?.samples.some(sample=>sample.id===issue.sampleId&&sample.critical));
@@ -100,7 +122,7 @@ export default function Page() {
         request.current.controller?.abort();const jobId=request.current.jobId;request.current.jobId=null;
         if(jobId)return fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'cancel',jobId}),keepalive:true}).then(async response=>response.ok?journeySnapshotResponse.parse(await response.json()):undefined).catch(()=>undefined);
     }
-    function reset() { returnToRoute.current=null;setDetailRouteId(null);stopJob(); request.current.generation++; setScreen({ kind: 'idle' });setEditingSearch(false);setMapNotice(''); setSelected(''); setActive(''); setNav(null); setStep(0); setFocus(null); closeSearch(); }
+    function reset() { returnToRoute.current=null;setDetailRouteId(null);stopJob(); request.current.generation++; setScreen({ kind: 'idle' });setMapNotice(''); setSelected(''); setActive(''); setNav(null); setStep(0); setFocus(null); closeSearch(); }
     function begin(message:string){
         const previous=screen.kind==='result'?{...screen,journey:stopWaitingForResult(screen.journey,'새 검색을 시작하며 이전 분석을 중지했습니다.'),analysis:{...screen.analysis,phase:screen.analysis.phase==='running'?'canceled' as const:screen.analysis.phase}}:null;
         const previousSelected=selected;
@@ -123,7 +145,7 @@ export default function Page() {
     }
     function closeSearch(){if(searchTimer.current)clearTimeout(searchTimer.current);locationRequest.current?.abort();setLocationSearch(null);setFocusedField(null);setHighlighted(-1);}
     async function searchPlaces(query:string,signal:AbortSignal){
-        const address=/\d/.test(query);
+        const address=/(?:대로|로|길|동|읍|면|리)\s*\d+(?:-\d+)?(?:\s|$)/u.test(query);
         const places=searchResponse.parse(await call({action:'search',query,address},signal)).places;
         return address&&!places.length?searchResponse.parse(await call({action:'search',query,address:false},signal)).places:places;
     }
@@ -196,13 +218,12 @@ export default function Page() {
             if (task.generation !== request.current.generation) return;
             request.current.jobId=snapshot.jobId;
             setEditingSearch(false);
-            setSelected(snapshot.journey.recommendedId ?? snapshot.journey.routes[0]?.id ?? '');
+            setSelected(orderByRoutePreference(snapshot.journey.routes,preference).find(candidate=>snapshot.journey.assessments[candidate.id]?.decision.kind!=='detour')?.id??snapshot.journey.routes[0]?.id??'');
             const display=(current:JourneySnapshotResponse)=>{
                 if(task.generation!==request.current.generation||task.controller.signal.aborted)return;
                 displayedNewResult=true;
                 const {journey,phase,progress,captures}=current;
                 setScreen({kind:'result',journey,captures,analysis:{phase,checked:progress.checked,total:progress.total,message:progress.notice}});
-                if(journey.recommendedId&&phase==='ready'&&!explicitRouteSelection.current)setSelected(journey.recommendedId);
             };
             for (;;) {
                 if(task.generation!==request.current.generation || task.controller.signal.aborted) return;
@@ -249,41 +270,45 @@ export default function Page() {
     function selectRoute(id: string) { explicitRouteSelection.current=true;setConsent('');setSelected(id); setActive(''); setNav(null); setStep(0); setFocus(null); }
     return <main className="app">
  <nav className="rail" aria-label="주 메뉴"><a href="/" className="brand-icon" aria-label="길이음 홈"><RouteIcon size={26}/></a><button className="rail-item active"><Navigation size={22}/><span>길찾기</span></button><div className="rail-bottom"><Accessibility size={23}/><span>모두의 길</span></div></nav>
- <aside className={'sidebar ' + (collapsed ? 'collapsed' : '')+(detailRoute?' show-details':'')+(screen.kind==='result'?' has-results':'')+(editingSearch?' editing-search':'')}>
+ <aside className={'sidebar ' + (collapsed ? 'collapsed' : '')+(detailRoute?' show-details':'')+(screen.kind==='result'||end?' has-results':'')+(editingSearch?' editing-search':'')}>
  <header className="sidebar-head"><div><h1>길이음<span className="beta">BETA</span></h1><p>나에게 맞는 길로, 일상을 잇다</p></div><button className="icon-button collapse" aria-label="검색 패널 접기" onClick={() => setCollapsed(true)}><PanelLeftClose size={20}/></button></header>
- {screen.kind==='result'&&!detailRoute&&<div className="results-controls"><button type="button" aria-expanded={editingSearch} onClick={()=>setEditingSearch(value=>!value)}>{editingSearch?'검색 조건 접기':'출발지·도착지 및 조건 변경'}</button></div>}
+ {(screen.kind==='result'||end)&&!detailRoute&&<div className="results-controls"><button type="button" aria-label={screen.kind==='result'?'출발지·도착지 및 조건 변경':'출발지·도착지 / 경로 검색'} aria-expanded={editingSearch} onClick={()=>setEditingSearch(value=>!value)}><span className="search-journey-summary">{screen.kind==='result'?`${from} → ${to}`:to}</span><span>{editingSearch?'접기':screen.kind==='result'?'변경':'경로 검색'}</span></button></div>}
  {!detailRoute && <section className="search-section"><div className="mode-row"><span className="mode active"><Accessibility size={17}/> 편한 길찾기</span><span className="region">보행 · 이동 지원</span></div>
  <div className="locations" onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget))closeSearch();}}>{locationInput('start')}{locationInput('end')}<button className="swap" aria-label="출발지와 도착지 바꾸기" onClick={() => { reset(); setFrom(to); setTo(from); setStart(end); setEnd(start); }}><ArrowUpDown size={16}/></button></div>
  <div className="pick-row"><button onClick={() => { reset(); setPick('start'); }}>출발지 지도에서 선택</button><button onClick={() => { reset(); setPick('end'); }}>도착지 지도에서 선택</button></div>
- <div className="profile-row"><label htmlFor="profile"><Accessibility size={17}/> 이동 수단</label><select id="profile" value={profile} onChange={event => { reset(); setProfile(event.target.value); }}>{['수동 휠체어', '전동 휠체어', '유아차', '보행 보조기'].map(value => <option key={value}>{value}</option>)}</select></div>
+ <details className="search-options"><summary>검색 옵션</summary>
  <div className="profile-row"><label htmlFor="goal"><MapPin size={17}/> 도착 범위</label><select id="goal" value={goal} onChange={event=>{const value=event.target.value;if(value==='arrival'||value==='entrance'){reset();setGoal(value);}}}><option value="arrival">지도 도착 지점까지</option><option value="entrance">건물 출입구 진입까지 확인</option></select></div>
- <div className="profile-row"><label htmlFor="imagery"><Eye size={17}/> 거리 이미지</label><select id="imagery" value={imageryProvider} onChange={event=>{const value=event.target.value;if(value==='configured'||value==='kartaview'){reset();setImageryProvider(value);}}}><option value="configured">기존 설정</option><option value="kartaview">KartaView · 연구용</option></select></div>
+ <div className="profile-row"><label htmlFor="imagery"><Eye size={17}/> 거리 이미지</label><select id="imagery" value={imageryProvider} onChange={event=>{const value=event.target.value;if(value==='configured'||value==='kartaview'||value==='google'){reset();setImageryProvider(value);}}}><option value="configured">기존 설정</option><option value="kartaview">KartaView · 연구용</option><option value="google">Google Street View · 연구용</option></select></div>
  {imageryProvider==='kartaview'&&<p className="subnote">KartaView는 일부 지역의 과거 사진만 제공합니다. 사진이 없는 구간은 판독할 수 없으며, 서비스 제공 전 이용 허락 확인이 필요합니다.</p>}
- <p className="subnote">정밀 경사율은 미측정입니다. 사진에서 임의의 % 경사율을 만들지 않아요.</p>
+ {imageryProvider==='google'&&<p className="subnote">Google Street View는 연구용 선택입니다. Google 약관은 영상의 저장과 파생 데이터 생성을 제한하며 Google 이외의 지도와 같은 화면에 표시하는 것을 금지합니다. 이 앱은 Kakao 지도를 사용하고 이미지와 분석 결과를 저장하므로 사용 전에 약관과 권한을 직접 확인하세요. 이 선택은 사용 권한을 부여하지 않습니다.</p>}
+ <p className="subnote">계단을 피하는 공통 기준으로 비교합니다. 경사 수치는 지형고도 추정이며 보행면 실측값이 아닙니다.</p>
+ </details>
  {end&&!journey&&<DestinationInfo place={end}/>}
  <button className="primary search-button" disabled={busy} onClick={findJourney}><RouteIcon size={19}/> 경로 찾기 <ArrowRight size={18}/></button>
  <div className="location-status">{start ? <><Check size={12}/> 출발지 선택</> : <>출발지 입력</>}<span>·</span>{end ? <><Check size={12}/> 도착지 선택</> : <>도착지 입력</>}</div></section>}
  {screen.kind === 'error' && <div ref={errorNotice} tabIndex={-1} className="notice" role="alert">{screen.message}</div>}
  {mapNotice&&<div className="notice" role="alert">{mapNotice}<button type="button" aria-label="위치 안내 닫기" onClick={()=>{setMapNotice('');locateButton.current?.focus({preventScroll:true});}}><X size={16}/></button></div>}
  {screen.kind==='result'&&analyzing&&<div className="progress" role="status"><LoaderCircle size={17} className="spin"/><span>판독 완료 {screen.analysis.checked} / {screen.analysis.total} 지점 · 확보 영상 {screen.captures.length}장{screen.analysis.message&&<><br/>{screen.analysis.message}</>}</span><button onClick={()=>{const generation=request.current.generation;focusStoppedNotice.current=true;void stopJob()?.then(current=>{if(current&&generation===request.current.generation){if(current.phase!=='canceled'){focusStoppedNotice.current=false;focusResults.current=true;}setScreen({kind:'result',journey:current.journey,captures:current.captures,analysis:{phase:current.phase,checked:current.progress.checked,total:current.progress.total,message:current.progress.notice}});}});setScreen({...screen,journey:stopWaitingForResult(screen.journey,'이 화면의 자동 진행을 중지했습니다. 확보한 사진과 관찰만 표시합니다.'),analysis:{...screen.analysis,phase:'canceled',message:'분석 중지를 요청했습니다. 확보한 결과만 표시합니다.'}});}}>중지</button></div>}
- {screen.kind === 'result' && screen.analysis.phase==='canceled' && <div ref={stoppedNotice} tabIndex={-1} className="notice" role="status">{screen.analysis.message??'분석이 중지됐습니다. 확보한 결과만 표시합니다.'}</div>}
- {screen.kind === 'result' && screen.analysis.phase==='limited' && screen.analysis.message && <div className="notice" role="status">{screen.analysis.message} <button type="button" onClick={findJourney}>같은 조건으로 다시 찾기</button>{detailRoute&&<button type="button" onClick={closeDetails}>다른 경로 비교</button>}</div>}
- {screen.kind === 'result' && screen.analysis.phase==='failed' && <div className="notice" role="alert">{screen.analysis.message ?? '이동 환경 분석을 완료하지 못했어요. 조회한 경로를 비교해 보세요.'} <button type="button" onClick={findJourney}>같은 조건으로 다시 찾기</button>{detailRoute&&<button type="button" onClick={closeDetails}>다른 경로 비교</button>}</div>}
+ {screen.kind === 'result' && screen.analysis.phase==='canceled' && <div ref={stoppedNotice} tabIndex={-1} className="notice" role="status">경로 사진 분석을 중지했어요.</div>}
+ {screen.kind === 'result' && (screen.analysis.phase==='limited'||screen.analysis.phase==='failed') && <div className="route-notice-shell" role={routeFailureNotice?'alert':'status'}><details className="notice route-analysis-notice"><summary>{routeFailureNotice?screen.analysis.message??'경로 사진 분석이 멈췄어요':'경로 확인 결과 · 상세 보기'}</summary>{!routeFailureNotice&&<p>{screen.analysis.message}</p>}<p>완료한 경로 관찰과 사진은 유지됩니다. 입구 사진 분석과는 별도 상태입니다.</p><button type="button" onClick={findJourney}>경로 다시 분석</button>{detailRoute&&<button type="button" onClick={closeDetails}>다른 경로 비교</button>}</details></div>}
  {screen.kind === 'loading' && <div className="progress" role="status"><LoaderCircle size={17} className="spin"/><span>{screen.message}</span><button type="button" onClick={cancelLoading}>검색 중지</button></div>}
- {detailRoute&&detailDecision&&screen.kind==='result'?<RouteDetails key={detailRoute.id} route={detailRoute} goal={screen.journey.goal} evidence={evidence} captures={screen.captures} phase={screen.analysis.phase} activeId={active} decision={detailDecision} onBack={closeDetails} onLocate={(id,coord)=>{setActive(id);setFocus(coord);}}/>:<div className="results-scroll" ref={listScroll}>{!journey?<section className="empty-state"><div className="eyebrow">오늘의 이동</div><h2>필요한 연결부를 확인하고,<br/>갈 수 있는 길을 비교해요.</h2><p>출발지와 도착지를 선택하면 실제 거리영상의 관찰 근거로 경로를 비교합니다.</p></section>:<section className="routes-section"><div className="section-title"><h2 ref={resultsHeading} tabIndex={-1}>이동 경로 <span>{routes.length}</span></h2></div>
- <p className="subnote">{journey.goal==='entrance'?'건물 출입구 연결까지 확인하는 탐색입니다.':'지도 도착 지점까지의 경로입니다. 건물 출입구 진입은 확인하지 않습니다.'}</p>
+ {detailRoute&&detailDecision&&screen.kind==='result'&&<RouteDetails key={detailRoute.id} route={detailRoute} goal={screen.journey.goal} evidence={evidence} captures={screen.captures} phase={screen.analysis.phase} activeId={active} decision={detailDecision} gradeThreshold={gradeThreshold} onBack={closeDetails} onLocate={(id,coord)=>{setActive(id);setFocus(coord);}}/>}<div className="results-scroll" ref={listScroll} hidden={!!detailRoute}>{end&&<PlaceEntrance key={end.id+end.coord.join(',')} place={end} onLocate={setFocus}/>} {!journey?<section className="empty-state"><div className="eyebrow">오늘의 이동</div><h2>필요한 연결부를 확인하고,<br/>갈 수 있는 길을 비교해요.</h2><p>출발지와 도착지를 선택하면 실제 거리영상의 관찰 근거로 경로를 비교합니다.</p></section>:<section className="routes-section"><div className="section-title"><h2 ref={resultsHeading} tabIndex={-1}>이동 경로 <span>{routes.length}</span></h2></div>
+ <p className="subnote">{journey.goal==='entrance'?'건물 출입구 연결까지 확인':'건물 입구 진입은 별도 확인'} · 경사는 지형 추정</p>
+ <details className="secondary-journey-info"><summary>장소·대중교통 정보</summary>
  {end&&<DestinationInfo place={end}/>}
  {start&&<StationFacilityInfo place={start}/>}
  {end&&<StationFacilityInfo place={end}/>}
  {start&&end&&<TransitJourney start={start} end={end}/>}
- {!journey.recommendedId&&!analyzing&&<div className="no-route-recommendation" role="status"><strong>현재 추천할 수 있는 경로를 찾지 못했어요.</strong><p>관찰 근거와 선택한 이동 조건으로 추천할 수 있는 대안이 확보되지 않았습니다. 각 후보의 이유를 확인하세요. 일반 도보 순서 미리보기는 접근성 안내가 아닙니다.</p></div>}
- {routes.map(candidate=>{const decision=journey.assessments[candidate.id]?.decision;if(!decision)return null;const providerRestriction=hasOnlyProviderBarriers(decision);return <article key={candidate.id} className={'route-card '+(candidate.id===selected?'selected':'')}><button className="route-select" aria-label={candidate.name+' 선택'} aria-pressed={candidate.id===selected} onClick={()=>selectRoute(candidate.id)}><div className="route-card-top"><b>{candidate.name}</b><span className={'route-action-tag kind-'+decision.kind+(providerRestriction?' provider-restriction':'')}>{candidate.graphSegment?'연결되지 않은 지도 구간':providerRestriction?'계단 안내 · 추천 제외':decisionLabels[decision.kind]}</span></div><div className="route-distance">{candidate.graphSegment?<span>지도 선형 {(candidate.distance/1000).toFixed(2)} km</span>:<>{Math.ceil(candidate.seconds/60)}<small> 분</small><span>{(candidate.distance/1000).toFixed(2)} km · 보행 기준</span></>}</div><p className="card-decision-action">{decision.action}</p><p className="card-decision-reason">{decision.reason}</p>{analyzing&&decision.kind==='hold'&&!candidate.graphSegment&&<small>필요한 지점 관찰과 연결부 재확인 중</small>}{candidate.detourReason&&<p className="detour-reason">{candidate.detourReason}</p>}</button><button className="route-detail-button" aria-label={candidate.name+' 상세 보기'} ref={element=>{if(element)detailButtons.current.set(candidate.id,element);else detailButtons.current.delete(candidate.id);}} onClick={()=>openDetails(candidate.id)}>{candidate.graphSegment?'연결되지 않은 구간 보기':'위치와 판단 근거 보기'} <ChevronRight size={15}/></button></article>;})}
- {route&&routeDecision&&(routeDecision.kind==='hold'||routeDecision.kind==='detour')&&!!visibleIssues.length&&<section className="conditional-confirmation" aria-label="확인이 필요한 경로 위치"><h3>안내 전 확인할 위치</h3><p>표시된 위치와 이유를 확인하세요. 미확인은 통행 장애가 확인됐다는 뜻이 아닙니다.</p>{issueList()}</section>}
+ </details>
+ <section className="route-preference" aria-label="경로 비교 기준"><div className="preference-buttons"><button type="button" aria-pressed={preference==='gentle'} onClick={()=>choosePreference('gentle')}>경사가 완만한 후보부터</button><button type="button" aria-pressed={preference==='fast'} onClick={()=>choosePreference('fast')}>시간이 빠른 후보부터</button></div></section>
+ {orderedRoutes.map(candidate=>{const decision=journey.assessments[candidate.id]?.decision;if(!decision)return null;const providerRestriction=hasOnlyProviderBarriers(decision);return <article key={candidate.id} className={'route-card '+(candidate.id===selected?'selected':'')}><button className="route-select" aria-label={candidate.name+' 선택'} aria-pressed={candidate.id===selected} onClick={()=>selectRoute(candidate.id)}><div className="route-card-top"><b>{candidate.name}</b><span className={'route-action-tag kind-'+decision.kind+(providerRestriction?' provider-restriction':'')}>{providerRestriction?'지도 계단 · 제외':decisionLabels[decision.kind]}</span></div><div className="route-distance">{Math.ceil(candidate.seconds/60)}<small> 분</small><span>{(candidate.distance/1000).toFixed(2)} km · 보행 기준</span></div><p className="route-metrics">{candidate.grade&&candidate.grade.status!=='unavailable'?`추정 경사 최대 ${candidate.grade.maxAbsPercent.toFixed(1)}%${candidate.grade.status==='partial'?' · 일부 자료':''}`:'경사 자료 없음'} · 횡단 {candidate.samples.filter(sample=>sample.target==='crossing-entry').length}곳</p>{candidate.crossingChoice&&<p className="detour-reason">{candidate.crossingChoice.label} 경유</p>}<p className="card-decision-reason">{routeHeadline(decision)}</p></button><button className="route-detail-button" aria-label={candidate.name+' 상세 보기'} ref={element=>{if(element)detailButtons.current.set(candidate.id,element);else detailButtons.current.delete(candidate.id);}} onClick={()=>openDetails(candidate.id)}>위치·사진·이유 보기 <ChevronRight size={15}/></button></article>;})}
+ <details className="route-map-details"><summary>선택 경로의 경사·횡단 지점</summary><p className="subnote">조회한 후보 사이의 비교이며, 계단·장애 제외는 유지합니다. 경사 자료가 없는 길을 평지로 취급하지 않습니다.</p><label>지도 경사 강조 기준 <select aria-label="경사 강조 기준" value={gradeThreshold} onChange={event=>setGradeThreshold(Number(event.target.value))}>{[5,8,12].map(value=><option key={value} value={value}>{value}% 이상</option>)}</select></label>{route&&<RouteTerrain route={route} threshold={gradeThreshold} onLocate={setFocus}/>}</details>
+ {route&&routeDecision&&(routeDecision.kind==='hold'||routeDecision.kind==='detour')&&!!visibleIssues.length&&<details className="conditional-confirmation" aria-label="확인이 필요한 경로 위치"><summary>안내 전 확인할 위치 {visibleIssues.length}곳</summary>{issueList()}</details>}
  {route&&routeDecision&&<>{routeDecision.kind==='conditional'&&!guideBlocked&&<section className="conditional-confirmation" aria-label="조건부 경로 확인"><h3>확인이 필요한 조건부 후보</h3><p>{routeDecision.reason}</p><p>{routeDecision.action}</p><p>{journey.goal==='entrance'?'건물 출입구 연결까지의 후보입니다.':'지도 도착 지점까지의 후보이며 건물 출입구 진입은 포함하지 않습니다.'} 표본 지점 사이와 현재 현장 상태는 확인되지 않았습니다. 거리영상은 촬영 당시의 과거 모습이며 촬영 날짜는 각 지점의 근거에 표시됩니다.</p><h4>확인할 위치와 조치</h4>{issueList()}<label><input type="checkbox" checked={conditionalConfirmed} disabled={!conditionalKey} onChange={event=>setConsent(event.target.checked?conditionalKey:'')}/> 표시된 위치와 더 보기의 모든 미확인 위치, 영상의 한계를 이해했으며 현장에서 직접 확인하겠습니다.</label>{analyzing&&<p>분석이 끝난 뒤 확인하고 시작할 수 있습니다.</p>}</section>}
  <button className="primary full" disabled={!(guideVerified||conditionalConfirmed)||!route.steps.length} onClick={()=>{if(!(guideVerified||conditionalConfirmed))return;explicitRouteSelection.current=true;setNav('guide');setStep(0);if(route.steps[0])setFocus(route.steps[0].coord);}}>{guideVerified?'영상 기준 추천 경로 안내':routeDecision.kind==='conditional'&&!guideBlocked?'조건부 경로 안내 시작':'이 경로는 접근성 안내를 시작할 수 없어요'} <Navigation size={18}/></button>{(routeDecision.kind==='hold'||routeDecision.kind==='conditional')&&!guideBlocked&&<button className="walking-preview" disabled={!route.steps.length} onClick={()=>{explicitRouteSelection.current=true;setNav('preview');setStep(0);if(route.steps[0])setFocus(route.steps[0].coord);}}>일반 도보 순서만 미리 보기 · 접근성 안내 아님</button>}</>}
 
- </section>}</div>}<footer className="sidebar-footer"><Accessibility size={15}/><span>모두의 일상을 잇는 길찾기</span></footer></aside>
- <section className="map-area"><MapView routes={routes} selected={selected} activeId={active} assessments={journey?.assessments??{}} start={start} end={end} onPoint={point} onEvidence={inspectPoint} focus={focus}/><div className="map-topbar">{collapsed&&<button className="map-button" aria-label="검색 패널 열기" onClick={()=>setCollapsed(false)}><PanelLeftOpen size={20}/></button>}<div className="map-context"><span className="live-dot"/> 관찰 근거로 비교하는 길찾기</div></div>
+ </section>}</div><footer className="sidebar-footer"><Accessibility size={15}/><span>모두의 일상을 잇는 길찾기</span></footer></aside>
+ <section className="map-area"><MapView routes={routes} selected={selected} activeId={active} assessments={journey?.assessments??{}} start={start} end={end} onPoint={point} onEvidence={inspectPoint} focus={focus} gradeThreshold={gradeThreshold} onFocus={setFocus}/><div className="map-topbar">{collapsed&&<button className="map-button" aria-label="검색 패널 열기" onClick={()=>setCollapsed(false)}><PanelLeftOpen size={20}/></button>}<div className="map-context"><span className="live-dot"/> 관찰 근거로 비교하는 길찾기</div></div>
  {pick && <div className="pick-banner"><MapPin size={17}/> 지도에서 {pick === 'start' ? '출발지' : '도착지'}를 선택하세요<button onClick={() => setPick(null)}>취소</button></div>}
  <button ref={locateButton} className="locate map-button" aria-label="내 위치로 지도 이동" onClick={()=>{if(!navigator.geolocation){setMapNotice('이 기기에서는 현재 위치를 사용할 수 없습니다.');return;}setMapNotice('');navigator.geolocation.getCurrentPosition(position=>setFocus([position.coords.longitude,position.coords.latitude]),()=>setMapNotice('현재 위치를 찾지 못했습니다. 위치 권한을 확인해 주세요.'));}}><LocateFixed size={21}/></button>
 

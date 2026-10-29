@@ -1,0 +1,48 @@
+import {mkdir,writeFile} from 'node:fs/promises';
+import {chromium} from '../services/roadview-renderer/node_modules/playwright/index.mjs';
+import assert from 'node:assert/strict';
+
+const base=process.env.MOBILITY_BASE_URL??'http://localhost:3000';
+const output=process.env.MOBILITY_REPORT_DIR??'.sites-runtime/mobility-features';
+await mkdir(output,{recursive:true});
+const browser=await chromium.launch({channel:'chrome',headless:true,args:['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--enable-webgl','--ignore-gpu-blocklist']});
+const page=await browser.newPage({viewport:{width:1440,height:960}});
+const errors=[];page.on('pageerror',error=>errors.push(error.message));
+try{
+ await page.goto(base,{waitUntil:'networkidle'});
+ assert.equal(await page.getByRole('combobox',{name:'이동 수단',exact:true}).count(),0);
+ await page.getByRole('combobox',{name:'도착지',exact:true}).fill('카페칸나');
+ await page.getByRole('button',{name:'도착지 검색',exact:true}).click();
+ await page.getByRole('option',{name:'카페칸나 경기 수원시 영통구 덕영대로 1693',exact:true}).click();
+ await page.getByRole('button',{name:'입구 확인',exact:true}).click();
+ await page.locator('.place-entrance h4').waitFor({timeout:110000});
+ const entrance={text:await page.locator('.place-entrance').innerText(),photos:await page.locator('.place-entrance figure').count()};
+ await page.locator('.place-entrance').screenshot({path:output+'/cafe-entrance.png'});
+ assert.ok(entrance.photos>0,'A live entrance inspection must retain its actual source images');
+ if(!await page.locator('#to').isVisible())await page.locator('.results-controls button').click();
+ await page.getByRole('combobox',{name:'도착지',exact:true}).fill('경희대학교 국제캠퍼스 학생회관');
+ await page.getByRole('button',{name:'도착지 검색',exact:true}).click();
+ await page.getByRole('option').filter({hasText:'경희대학교 국제캠퍼스 학생회관'}).first().click();
+ await page.getByRole('button',{name:'경로 찾기',exact:true}).click();
+ await page.locator('.route-card').first().waitFor({timeout:90000});
+ await page.getByRole('button',{name:'중지',exact:true}).click();
+ assert.equal(await page.locator('.route-terrain .terrain-summary').count(),1,'Live route grades must contain actual estimated data, not an unavailable placeholder');
+ await page.getByRole('button',{name:'시간이 빠른 후보부터',exact:true}).click();
+ const fast=await page.locator('.route-card .route-card-top b').allTextContents();
+ await page.getByRole('button',{name:'경사가 완만한 후보부터',exact:true}).click();
+ const gentle=await page.locator('.route-card .route-card-top b').allTextContents();
+ await page.locator('.route-map-details > summary').click();
+ await page.getByRole('combobox',{name:'경사 강조 기준',exact:true}).selectOption('5');
+ await page.locator('.route-detail-button').first().click();
+ await page.locator('.route-details .route-terrain details summary').click();
+ assert.match(await page.locator('.route-details .route-terrain').innerText(),/절대 경사 5%/);
+ await page.getByRole('button',{name:'경로 목록으로',exact:true}).click();
+ assert.equal(await page.getByRole('combobox',{name:'경사 강조 기준',exact:true}).inputValue(),'5');
+ await page.screenshot({path:output+'/routes-desktop.png'});
+ await page.setViewportSize({width:390,height:844});
+ await page.screenshot({path:output+'/routes-mobile.png'});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'Mobile content must not overflow');
+ assert.deepEqual(errors,[]);
+ await writeFile(output+'/live-verification.json',JSON.stringify({base,entrance,fast,gentle,errors,checkedAt:new Date().toISOString()},null,2));
+ console.log(JSON.stringify({entrancePhotos:entrance.photos,entranceResult:entrance.text.split('\n').slice(0,6),fast,gentle,errors}));
+}finally{await browser.close();}

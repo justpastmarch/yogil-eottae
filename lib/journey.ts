@@ -4,29 +4,29 @@ import {z} from 'zod';
 import {projectOnRoute,meters,validateFinding,evaluateRoute,recommendedRoute,inspectionOrder,journeyGoal,type RouteExploration,type JourneyGoal,type Evidence,type JourneyResult,type Place,type Coord,type Route} from './domain.ts';
 import {routes,reroute} from './providers.ts';
 import {blockedPassageFor,routeTouchesPassage,routeIsDistinct,detourViaPlans,validateCandidate} from './detours.ts';
-import {analyzeKhuImage,analyzeKhuViews,validateJointFinding,KhuError} from './khu.ts';
+import {analyzeKhuImage,analyzeKhuViews,validateJointFinding,KhuError,khuFailureReason} from './khu.ts';
 import {streetImage,ImageryServiceError} from './street-imagery.ts';
 import type {ServerConfig} from './server-config.ts';
 import {journeyResponse} from './requests.ts';
-import {fetchTerrain} from './elevation.ts';
-import {discoverRouteCrossings,matchGroupedCrossings} from './osm-crossings.ts';
+import {loadRouteGrades} from './route-grade.ts';
+import {discoverCrossingAlternatives,selectedCrossingMatches} from './crossing-alternatives.ts';
+import {discoverRouteCrossings,matchGroupedCrossings,type CrossingMatch} from './osm-crossings.ts';
 import {loadPedestrianGraph,type GraphLoadResult} from './osm-data.ts';
-import type {PedestrianGraph} from './osm-graph.ts';
-import {findPedestrianPath} from './pedestrian-routing.ts';
 import type {CaptureObserver} from './capture-contract.ts';
+import {graphBarriersForRoute} from './graph-barriers.ts';
 
 export const journeyPhase=z.enum(['running','ready','limited','failed','canceled']);
-export const JOURNEY_VERSION=7;
+export const JOURNEY_VERSION=8;
 const coord=z.tuple([z.number(),z.number()]);
 const place=z.object({id:z.string(),name:z.string(),address:z.string(),coord});
 export const journeyStateSchema=z.object({
-    version:z.literal(JOURNEY_VERSION),provider:z.enum(['kakao','tmap']),imageryProvider:z.enum(['configured','kartaview']).optional(),goal:journeyGoal,notice:z.string().optional(),start:place,end:place,profile:z.string(),maxSlope:z.number().nullable().optional(),
+    version:z.literal(JOURNEY_VERSION),provider:z.enum(['kakao','tmap']),imageryProvider:z.enum(['configured','kartaview','google']).optional(),goal:journeyGoal,notice:z.string().optional(),start:place,end:place,profile:z.string(),maxSlope:z.number().nullable().optional(),
     candidates:journeyResponse.shape.routes,evidence:journeyResponse.shape.evidence,
     exclusions:z.array(z.object({id:z.string(),routeId:z.string(),sampleId:z.string(),fromAlong:z.number(),toAlong:z.number(),coords:z.array(coord),reason:z.enum(['obstacle','unverified']).optional(),detail:z.string().optional()})),
     pendingReplans:z.array(z.array(coord)),lookups:z.number().int().nonnegative(),analyses:z.number().int().nonnegative(),replans:z.number().int().nonnegative(),phase:journeyPhase,
 });
 export type JourneyState=z.infer<typeof journeyStateSchema>;
-export type JourneyInput={start:Place;end:Place;profile:string;goal:JourneyGoal;maxSlope?:number|null;imageryProvider?:'configured'|'kartaview'};
+export type JourneyInput={start:Place;end:Place;profile:string;goal:JourneyGoal;maxSlope?:number|null;imageryProvider?:'configured'|'kartaview'|'google'};
 type CaptureOperation={kind:'capture';route:Route;sample:Route['samples'][number]};
 type ReviewOperation={kind:'review';route:Route;sample:Route['samples'][number];captureLimit:number};
 type ReplanOperation={kind:'replan';via:Coord[]};
@@ -41,7 +41,7 @@ export function providerStairSamples(route:Route,profile:string):Route['samples'
         return projection&&projection.distance<=20?[{id:'provider-stairs-'+index,coord:projection.coord,along:projection.along,heading:projection.heading,critical:true}]:[];
     });
 }
-function prepareRoute(route:Route,profile:string,goal:JourneyGoal,start:Place,end:Place,graphResult:GraphLoadResult):Route{
+function prepareRoute(route:Route,profile:string,goal:JourneyGoal,start:Place,end:Place,graphResult:GraphLoadResult,selectedMatches:CrossingMatch[]|null=null):Route{
     const graph=graphResult.kind==='available'?graphResult.graph:undefined;
     route.graphCoverage=graph?{status:'available',snapshotAt:graph.snapshotAt}:{status:'unavailable',reason:graphResult.kind==='unavailable'?graphResult.reason:'no-data'};
     const samples:Route['samples']=route.samples.map(sample=>({...sample,target:'sidewalk'}));
@@ -116,59 +116,64 @@ function prepareRoute(route:Route,profile:string,goal:JourneyGoal,start:Place,en
             route.unresolvedCrossings.push({id:'unresolved-osm-crossing-'+crossing.wayId,coord:crossing.coord,along:crossing.along,count:1,source:'osm'});
         }
     }
+    for(const match of selectedMatches??[]){
+        const entry=match.targets[0];
+        if(!entry)continue;
+        const resolvedProvider:NonNullable<Route['unresolvedCrossings']>=route.unresolvedCrossings.filter(crossing=>crossing.source!=='osm'&&crossing.count===1&&Math.abs(crossing.along-entry.along)<=8);
+        for(const target of match.targets){
+            const fallback=target.target==='crossing-entry'&&resolvedProvider.length===1?route.samples.find(sample=>sample.target==='crossing-entry'&&Math.abs(sample.along-resolvedProvider[0].along)<1):undefined;
+            if(fallback)Object.assign(fallback,{coord:target.coord,along:target.along,heading:target.heading});
+            else addTarget(target.along,target.target,target.coord,target.heading);
+        }
+        route.unresolvedCrossings=route.unresolvedCrossings.filter(crossing=>!(crossing.source==='osm'&&match.wayIds.some(id=>crossing.id==='unresolved-osm-crossing-'+id))&&!(resolvedProvider.length===1&&crossing===resolvedProvider[0]));
+        if(!route.crossingSources.some(source=>source.wayIds.some(id=>match.wayIds.includes(id))))route.crossingSources.push({provider:'openstreetmap',snapshotAt:match.snapshotAt,wayIds:match.wayIds,along:entry.along});
+    }
     const last=route.samples.reduce<Route['samples'][number]|undefined>((best,sample)=>!best||sample.along>best.along?sample:best,undefined);
     if(last){
         if(last.target==='sidewalk'){last.critical=true;last.target=goal;}
         else route.samples.push({...last,id:goal+'-'+route.samples.length,critical:true,target:goal});
     }
     route.barriers=providerStairSamples(route,profile).map(sample=>({sampleId:sample.id,coord:sample.coord,along:sample.along,reason:'도보 길찾기가 이 지점에서 “계단이용”으로 안내합니다.'}));
+    if(graph)route.barriers.push(...graphBarriersForRoute(route,graph));
     for(const barrier of route.barriers){
         if(!route.samples.some(sample=>sample.id===barrier.sampleId))route.samples.push({id:barrier.sampleId,coord:barrier.coord,along:barrier.along,heading:projectOnRoute(route.coords,barrier.coord)?.heading??0,critical:true,target:'sidewalk'});
     }
     route.samples.sort((a,b)=>a.along-b.along);
     return route;
 }
-function partialGraphRoute(start:Place,end:Place,pedestrianGraph:PedestrianGraph):Route|null{
-    // These nodes are only nearby map features, not established connectors.
-    const usableNodes=new Set(pedestrianGraph.edges.filter(edge=>edge.access==='unknown').flatMap(edge=>[edge.from,edge.to]));
-    const nearest=(coord:Coord)=>{
-        let best:{id:string;distance:number}|undefined;
-        for(const id of usableNodes){
-            const node=pedestrianGraph.nodes[id];
-            if(!node)continue;
-            const distance=meters(coord,node.coord);
-            if(distance<=100&&(!best||distance<best.distance))best={id,distance};
-        }
-        return best;
-    };
-    const first=nearest(start.coord),last=nearest(end.coord);
-    if(!first||!last||first.id===last.id)return null;
-    const path=findPedestrianPath(pedestrianGraph,first.id,last.id,new Set());
-    if(!path||!path.edges.length)return null;
-    return {
-        id:`osm-segment:${first.id}:${last.id}`,
-        name:'지도에 연결된 일부 구간',
-        options:[],coords:path.nodes.map(id=>pedestrianGraph.nodes[id].coord),
-        distance:path.distance,seconds:0,steps:[],samples:[],fetchedAt:pedestrianGraph.snapshotAt,
-        graphCoverage:{status:'available',snapshotAt:pedestrianGraph.snapshotAt},
-        graphSegment:{provider:'openstreetmap',snapshotAt:pedestrianGraph.snapshotAt,startGapMeters:first.distance,endGapMeters:last.distance,sharedRoadMeters:path.edges.filter(edge=>edge.kind==='shared-road').reduce((total,edge)=>total+edge.length,0)},
-    };
-}
 const imageryOutageNotice='거리영상 서비스 연결이 끊겨 추가 분석을 중단했습니다. 확보한 결과는 유지했습니다.';
+const missingGoogleKeyNotice='Google 거리영상을 사용하려면 서버에 GOOGLE_STREET_VIEW_API_KEY를 설정해 주세요.';
+const googleErrorNotice='Google 거리영상 API 요청에 실패해 분석을 중단했습니다. 서버 키와 API 설정을 확인해 주세요.';
 export async function createJourneyState(input:JourneyInput,config:ServerConfig,signal:AbortSignal,loadGraph:typeof loadPedestrianGraph=loadPedestrianGraph):Promise<JourneyState>{
     const providerRoutes=(await routes(input.start,input.end,config.routing,signal)).routes;
     const graphs=await Promise.all(providerRoutes.map(route=>loadGraph(route,signal,config.osmEndpoint)));
     signal.throwIfAborted();
     const candidates=providerRoutes.map((route,index)=>prepareRoute(route,input.profile,input.goal,input.start,input.end,graphs[index]));
-    for(const graph of graphs){
-        if(graph.kind!=='available')continue;
-        const graphSegment=partialGraphRoute(input.start,input.end,graph.graph);
-        if(graphSegment){candidates.push(graphSegment);break;}
+    const graph=graphs.find(result=>result.kind==='available');
+    if(graph?.kind==='available'&&config.routing.kind==='kakao'){
+        const proposals=discoverCrossingAlternatives(input.start,input.end,candidates,graph.graph);
+        for(const proposal of proposals){
+            if(candidates.length-providerRoutes.length>=2)break;
+            try{
+                const candidate=await reroute(input.start,input.end,config.routing,proposal.via,signal);
+                if(providerStairSamples(candidate,input.profile).length||!validateCandidate(candidate,providerRoutes[0],[]).ok||!routeIsDistinct(candidate,candidates))continue;
+                const matched=selectedCrossingMatches(candidate,proposal,graph.graph);
+                if(!matched)continue;
+                const result=await loadGraph(candidate,signal,config.osmEndpoint);
+                const alternative=prepareRoute(candidate,input.profile,input.goal,input.start,input.end,result,matched);
+                if(alternative.barriers?.length)continue;
+                const label='다른 횡단보도 '+(candidates.length-providerRoutes.length+1);
+                alternative.name=label;
+                alternative.crossingChoice={id:proposal.id,label,wayIds:proposal.crossingWayIds};
+                candidates.push(alternative);
+            }catch{signal.throwIfAborted();}
+        }
     }
-    const terrain=await fetchTerrain(candidates[0]?.samples.map(sample=>sample.coord)??[],signal);
-    if(candidates[0])candidates[0].terrain=terrain;
+    const grades=await loadRouteGrades(candidates,signal);
+    for(const route of candidates)route.grade=grades[route.id];
     const imageryProvider=input.imageryProvider??config.imageryProvider??'configured';
-    const state:JourneyState={...input,imageryProvider,version:JOURNEY_VERSION,provider:config.routing.kind,candidates,evidence:{},exclusions:[],pendingReplans:[],lookups:0,analyses:0,replans:0,phase:imageryProvider==='kartaview'||config.mapillary||config.rendererUrl?'running':'limited'};
+    const available=imageryProvider==='google'?!!config.googleStreetViewKey:imageryProvider==='kartaview'||!!(config.mapillary||config.rendererUrl);
+    const state:JourneyState={...input,imageryProvider,version:JOURNEY_VERSION,provider:config.routing.kind,candidates,evidence:{},exclusions:[],pendingReplans:[],lookups:0,analyses:0,replans:0,phase:available?'running':'limited',...(imageryProvider==='google'&&!config.googleStreetViewKey?{notice:missingGoogleKeyNotice}:{})};
     for(const route of candidates)for(const barrier of route.barriers??[]){
         const sample={id:barrier.sampleId,coord:barrier.coord,along:barrier.along,heading:projectOnRoute(route.coords,barrier.coord)?.heading??0,critical:true};
         addExclusion(state,route,sample,'obstacle',barrier.reason);
@@ -177,7 +182,7 @@ export async function createJourneyState(input:JourneyInput,config:ServerConfig,
 }
 export function projectJourneyResult(state:JourneyState):JourneyResult{
     const alternatives=state.candidates.filter(route=>route.detourReason).length;
-    const interrupted=state.phase==='canceled'||state.phase==='failed'||state.phase==='limited'&&Object.values(state.evidence).some(item=>item.failure&&item.failure!=='missing'||item.review?.failure);
+    const interrupted=state.phase==='canceled'||state.phase==='failed'||state.phase==='limited'&&(state.notice===missingGoogleKeyNotice||Object.values(state.evidence).some(item=>item.failure&&item.failure!=='missing'||item.review?.failure));
     const exploration:RouteExploration={
         state:state.phase==='running'?'searching':interrupted?'interrupted':'finished',
         attempts:state.replans,alternatives,
@@ -196,8 +201,8 @@ export function projectJourneyResult(state:JourneyState):JourneyResult{
             displayedOrigins.add(originKey);
             const anchor=originalPoint??passage.coords[Math.floor(passage.coords.length/2)],projection=anchor?projectOnRoute(route.coords,anchor):null;
             if(!projection)return [];
-            const provider=originalRoute?.barriers?.some(point=>point.sampleId===passage.sampleId);
-            return [{sampleId:'shared-'+passage.id,coord:projection.coord,along:projection.along,reason:'공유하는 통로 · '+(passage.detail??'다른 후보에서 확인한 차단 요소가 있습니다.'),source:provider?'provider':'imagery'} satisfies NonNullable<Route['barriers']>[number]];
+            const originalBarrier=originalRoute?.barriers?.find(point=>point.sampleId===passage.sampleId);
+            return [{sampleId:'shared-'+passage.id,coord:projection.coord,along:projection.along,reason:'공유하는 통로 · '+(passage.detail??'다른 후보에서 확인한 차단 요소가 있습니다.'),source:originalBarrier?(originalBarrier.source??'provider'):'imagery'} satisfies NonNullable<Route['barriers']>[number]];
         });
         const assessed=inherited.length?{...route,barriers:[...(route.barriers??[]),...inherited]}:route;
         return [route.id,{blockedPassageIds,decision:evaluateRoute(assessed,state.evidence,blockedPassageIds,state.maxSlope,exploration)}];
@@ -269,6 +274,7 @@ export function reserveJourneyOperation(state:JourneyState):JourneyOperation|nul
 }
 export async function advanceJourneyState(state:JourneyState,operation:JourneyOperation,config:ServerConfig,signal:AbortSignal,deps:JourneyDependencies=dependencies,onCapture?:CaptureObserver):Promise<void>{
     if(state.imageryProvider)config={...config,imageryProvider:state.imageryProvider};
+    if(config.imageryProvider==='google'&&!config.googleStreetViewKey){state.phase='limited';state.notice=missingGoogleKeyNotice;return;}
     if(operation.kind==='replan'){
         if(config.routing.kind!=='kakao')return;
         const baseline=state.candidates.filter(route=>!route.graphSegment).reduce<Route|undefined>((best,route)=>!best||route.distance<best.distance?route:best,undefined);
@@ -279,6 +285,8 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
             const graph=await (deps.loadPedestrianGraph??loadPedestrianGraph)(candidate,signal,config.osmEndpoint);
             signal.throwIfAborted();
             const alternative=prepareRoute(candidate,state.profile,state.goal,state.start,state.end,graph);
+            if(alternative.barriers?.length)return;
+            alternative.grade=(await loadRouteGrades([alternative],signal))[alternative.id];
             alternative.name='우회 후보';alternative.detourReason='장애 또는 미확인 연결부를 피하도록 조회한 후보입니다. 영상 확인은 아직 필요합니다.';
             state.candidates.unshift(alternative);
         } catch {signal.throwIfAborted();}
@@ -318,10 +326,11 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
             }
         } catch(error){
             review.failure=error instanceof Error&&error.name==='TimeoutError'?reviewStage:error instanceof ImageryServiceError?'capture':error instanceof KhuError||error instanceof z.ZodError||error instanceof SyntaxError?'analysis':'service';
-            review.note='재검토 처리에 실패했습니다. 최초 관찰은 보존했습니다.';signal.throwIfAborted();
-            if(error instanceof ImageryServiceError){state.phase='limited';state.notice=imageryOutageNotice;return;}
-            if(error instanceof KhuError){state.phase='limited';state.notice='이미지 분석 서비스를 완료하지 못했습니다. 최초 관찰은 유지했습니다.';return;}
-            state.phase='limited';state.notice='재검토 처리에 실패했습니다. 다시 경로를 찾아 주세요.';return;
+            signal.throwIfAborted();
+            if(error instanceof ImageryServiceError){review.note='추가 사진 촬영에 실패했습니다. 최초 관찰은 보존했습니다.';state.phase='limited';state.notice=config.imageryProvider==='google'?googleErrorNotice:imageryOutageNotice;return;}
+            const detail=khuFailureReason(error,'review');
+            review.note='경로 재분석 실패: '+detail+' 최초 관찰은 보존했습니다.';
+            state.phase='limited';state.notice='경로 재분석 중단: '+detail;return;
         }
         const issue=evaluateRoute(route,state.evidence).issues.find(point=>point.sampleId===sample.id);
         if(issue?.status==='blocked')addExclusion(state,route,sample,'obstacle',issue.reason);
@@ -334,7 +343,7 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
         image=await deps.streetImage(sample,config,signal,target?{target}:{});
     } catch(error){
         signal.throwIfAborted();state.evidence[key]={sampleId:sample.id,stage:'processed',status:'unknown',failure:'service',reason:'거리영상 서비스 연결에 실패했습니다. 현장 통행 장애 판정이 아닙니다.',checkedAt:new Date().toISOString()};
-        state.phase='limited';state.notice=imageryOutageNotice;return;
+        state.phase='limited';state.notice=config.imageryProvider==='google'?googleErrorNotice:imageryOutageNotice;return;
     }
     if(!image){
         state.evidence[key]={sampleId:sample.id,stage:'processed',status:'unknown',failure:'missing',reason:'이 위치에서 판독에 사용할 거리영상을 확보하지 못했습니다.',checkedAt:new Date().toISOString()};
@@ -365,7 +374,9 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
         }
         if(issue?.status==='blocked')addExclusion(state,route,sample,'obstacle',issue.reason);
     } catch(error){
-        signal.throwIfAborted();state.evidence[key]={sampleId:sample.id,stage:'processed',status:'unknown',failure:'analysis',source:evidenceSource(image,sample),reason:'이미지 분석 처리에 실패했습니다. 현장 통행 장애 판정이 아닙니다.',checkedAt:new Date().toISOString()};
-        state.phase='limited';state.notice='이미지 분석 서비스를 완료하지 못했습니다. 확보한 결과는 보존했습니다.';
+        signal.throwIfAborted();
+        const detail=khuFailureReason(error,'initial');
+        state.evidence[key]={sampleId:sample.id,stage:'processed',status:'unknown',failure:'analysis',source:evidenceSource(image,sample),reason:'경로 사진 분석 실패: '+detail+' 현장 통행 장애 판정이 아닙니다.',checkedAt:new Date().toISOString()};
+        state.phase='limited';state.notice='경로 사진 분석 중단: '+detail;
     }
 }

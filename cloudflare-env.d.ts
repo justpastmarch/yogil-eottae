@@ -9,6 +9,7 @@ declare namespace Cloudflare {
     ROADVIEW_RENDERER_URL?: string;
     ROADVIEW_RENDERER_TOKEN?: string;
     STREET_IMAGERY_PROVIDER?: string;
+    GOOGLE_STREET_VIEW_API_KEY?: string;
     DB?: D1Database;
     BUCKET?: R2Bucket;
   }

@@ -7,6 +7,7 @@ import { createJourneyState, advanceJourneyState, reserveJourneyOperation, proje
 import {search} from '../lib/providers.ts';
 import snapshot from '../data/yeongtong-campus.osm.json' with {type:'json'};
 import {buildPedestrianGraph} from '../lib/osm-graph.ts';
+import {KhuError} from '../lib/khu.ts';
 const place = { id: 'a', name: 'a', address: 'a', coord: [127, 37] };
 const route: Route = { id: 'r', name: 'r', options: [], coords: [[127, 37], [127, 37.01]], distance: 1100, seconds: 600, steps: [], samples: samplesFor([[127, 37], [127, 37.01]]), fetchedAt: '' };
 function observed(sample:Route['samples'][number]):Evidence{
@@ -65,7 +66,8 @@ test('request scoped secrets stay isolated and missing imagery cannot produce an
 
 test('Kakao routing is selected only at configuration time and public map config excludes private keys', async () => {
     const {routingConfig,publicMapConfig}=await import('../lib/server-config.ts');
-    runWithServerEnv({KAKAO_REST_API_KEY:'private-rest',KAKAO_JAVASCRIPT_KEY:'a'.repeat(32),CHATKHU_API_KEY:'private-ai',TMAP_API_KEY:'other'},()=>{
+    runWithServerEnv({KAKAO_REST_API_KEY:'private-rest',KAKAO_JAVASCRIPT_KEY:'a'.repeat(32),CHATKHU_API_KEY:'private-ai',TMAP_API_KEY:'other',GOOGLE_STREET_VIEW_API_KEY:'private-google'},()=>{
+        assert.equal(serverConfig().googleStreetViewKey,'private-google');
         assert.deepEqual(routingConfig(),{kind:'kakao',restKey:'private-rest'});
         assert.deepEqual(publicMapConfig(),{javascriptKey:'a'.repeat(32)});
     });
@@ -137,7 +139,6 @@ const groupedCrossingSteps:Route['steps']=[
 test('grouped provider crossings stay unresolved even when every sampled connection is observed clear',async t=>{
     mockWalkingProvider(t,groupedCrossingSteps);
     const state=await walkingJourney(),candidate=state.candidates[0];
-    assert.equal(candidate.terrain?.status,'unavailable');
     assert.ok(candidate.unresolvedCrossings);
     assert.equal(candidate.unresolvedCrossings.length,1);
     assert.equal(candidate.unresolvedCrossings[0].count,2);
@@ -203,6 +204,28 @@ test('a ten metre destination gap remains an unverified route, not an arrival',a
     assert.equal(projectJourneyResult(state).recommendedId,null);
 });
 
+for(const barrier of [
+    {name:'steps',tags:{highway:'steps'}},
+    {name:'wheelchair access restriction',tags:{highway:'footway',wheelchair:'no'}},
+] as const)test(`mapped ${barrier.name} blocks a provider route without stair guidance even after clear observations`,async t=>{
+    mockWalkingProvider(t,[{text:'보행로 이동',coord:walkingCoords[0]},{text:'목적지 도착',coord:walkingCoords[3]}]);
+    const graph=buildPedestrianGraph({osm3s:{timestamp_osm_base:'2026-01-01T00:00:00Z'},elements:[
+        {type:'node',id:1,lon:127.0006,lat:37},{type:'node',id:2,lon:127.0008,lat:37},
+        {type:'way',id:10,nodes:[1,2],tags:barrier.tags},
+    ]});
+    const state=await walkingJourney('arrival',async()=>({kind:'available',graph})),candidate=state.candidates[0];
+    for(const sample of candidate.samples)await observeSample(state,candidate,sample);
+    const restored=journeyStateSchema.parse(JSON.parse(JSON.stringify(state)));
+    const mappedBarrier=restored.candidates[0].barriers?.find(point=>point.source==='osm');
+    assert.ok(mappedBarrier,'the mapped obstruction must survive journey persistence');
+    const result=projectJourneyResult(restored),decision=result.assessments[candidate.id].decision;
+    assert.ok(Object.values(result.evidence).every(item=>item.status==='clear'&&!item.review));
+    assert.equal(result.recommendedId,null);
+    assert.equal(decision.kind,'detour');
+    const issue=decision.issues.find(point=>point.sampleId===mappedBarrier.sampleId&&point.source==='osm');
+    assert.equal(issue?.status,'blocked');
+});
+
 test('a mapped crossing omitted from provider text requires both separately observed connections',async t=>{
     mockWalkingProvider(t,[{text:'보행로 이동',coord:walkingCoords[0]},{text:'목적지 도착',coord:walkingCoords[3]}]);
     const graph=buildPedestrianGraph({osm3s:{timestamp_osm_base:'2026-01-01T00:00:00Z'},elements:[
@@ -262,6 +285,51 @@ test('independent map discovery does not erase unresolved grouped provider guida
     for(const sample of candidate.samples)await observeSample(state,candidate,sample);
     assert.equal(projectJourneyResult(state).recommendedId,null);
 });
+test('one explicitly selected crossing cannot resolve two nearby provider crossing instructions',async t=>{
+    const entry:Coord=[127.0006,37],exit:Coord=[127.0008,37];
+    const northEntry:Coord=[entry[0],37.0002],northExit:Coord=[exit[0],37.0002];
+    const graph=buildPedestrianGraph({osm3s:{timestamp_osm_base:'2026-01-01T00:00:00Z'},elements:[
+        {type:'node',id:1,lon:walkingCoords[0][0],lat:37},{type:'node',id:2,lon:entry[0],lat:entry[1]},
+        {type:'node',id:3,lon:exit[0],lat:exit[1]},{type:'node',id:4,lon:walkingCoords[3][0],lat:37},
+        {type:'node',id:5,lon:northEntry[0],lat:northEntry[1]},{type:'node',id:6,lon:northExit[0],lat:northExit[1]},
+        {type:'way',id:10,nodes:[1,2],tags:{highway:'footway'}},
+        {type:'way',id:11,nodes:[3,4],tags:{highway:'footway'}},
+        {type:'way',id:100,nodes:[2,3],tags:{highway:'footway',footway:'crossing'}},
+        {type:'way',id:201,nodes:[2,5],tags:{highway:'footway'}},
+        {type:'way',id:101,nodes:[5,6],tags:{highway:'footway',footway:'crossing'}},
+        {type:'way',id:202,nodes:[6,3],tags:{highway:'footway'}},
+    ]});
+    t.mock.method(globalThis,'fetch',async(input:string|URL|Request)=>{
+        const url=new URL(input instanceof Request?input.url:String(input));
+        if(url.origin==='https://api.opentopodata.org')return new Response(null,{status:503});
+        assert.equal(url.origin,'https://dapi.kakao.com');
+        const via=url.searchParams.has('via_x');
+        const coords:Coord[]=via?[walkingCoords[0],entry,northEntry,northExit,exit,walkingCoords[3]]:walkingCoords;
+        const steps:Route['steps']=via?[
+            {text:'출발',coord:coords[0]},
+            {text:'횡단보도 이용',coord:northEntry},
+            {text:'횡단보도 이용',coord:[northEntry[0]+0.00001,northEntry[1]]},
+            {text:'목적지 도착',coord:walkingCoords[3]},
+        ]:[{text:'출발',coord:coords[0]},{text:'목적지 도착',coord:walkingCoords[3]}];
+        return Response.json({status:'OK',route:{properties:{totalDistance:via?222:178,totalTime:240},legs:[{steps:steps.map((step,index)=>({
+            properties:{x:step.coord[0],y:step.coord[1],guidance:step.text,distance:0,time:0},
+            path:{points:index===0?coords:[coords[coords.length-1]]},
+        }))}]}});
+    });
+    const state=await walkingJourney('arrival',async()=>({kind:'available',graph}));
+    const candidate=state.candidates.find(route=>route.crossingChoice?.wayIds.includes(101));
+    assert.ok(candidate,'the provider must return an accepted approach to the selected alternate crossing');
+    for(const sample of candidate.samples)await observeSample(state,candidate,sample);
+    const restored=journeyStateSchema.parse(JSON.parse(JSON.stringify(state)));
+    const result=projectJourneyResult(restored),decision=result.assessments[candidate.id].decision;
+    for(const id of ['unresolved-crossing-1','unresolved-crossing-2']){
+        assert.ok(restored.candidates.find(route=>route.id===candidate.id)?.unresolvedCrossings?.some(crossing=>crossing.id===id&&crossing.count===1));
+        assert.ok(decision.issues.some(issue=>issue.sampleId===id&&issue.source==='provider'&&issue.status==='unknown'));
+    }
+    assert.equal(result.recommendedId,null);
+    assert.equal(decision.kind,'hold');
+});
+
 test('a parallel offset crossing without safely matched endpoints remains unresolved',async t=>{
     mockWalkingProvider(t,[{text:'보행로 이동',coord:walkingCoords[0]},{text:'목적지 도착',coord:walkingCoords[3]}]);
     const graph=buildPedestrianGraph({osm3s:{timestamp_osm_base:'2026-01-01T00:00:00Z'},elements:[
@@ -404,6 +472,30 @@ test('unavailable graph retains the provider route and an unresolved crossing',a
     assert.deepEqual(state.exclusions,[]);
 });
 
+test('a replan whose returned approach traverses a mapped access restriction is rejected',async t=>{
+    mockWalkingProvider(t,groupedCrossingSteps);
+    const state=await walkingJourney(),baseline=state.candidates[0];
+    const coords:Coord[]=[walkingCoords[0],walkingCoords[1],[127.0005,37.0002],[127.0015,37.0002],walkingCoords[3]];
+    const candidate:Route={...baseline,id:'blocked-approach',coords,samples:samplesFor(coords),steps:[],distance:230};
+    const graph=buildPedestrianGraph({osm3s:{timestamp_osm_base:'2026-01-01T00:00:00Z'},elements:[
+        {type:'node',id:1,lon:127.0001,lat:37},{type:'node',id:2,lon:127.0004,lat:37},
+        {type:'way',id:10,nodes:[1,2],tags:{highway:'footway',access:'no'}},
+    ]});
+    let inspected:Route|undefined;
+    const deps:JourneyDependencies={
+        streetImage:async()=>{throw Error('unexpected capture');},
+        analyzeKhuImage:async()=>{throw Error('unexpected analysis');},
+        analyzeKhuViews:async()=>{throw Error('unexpected review');},
+        reroute:async()=>candidate,
+        loadPedestrianGraph:async route=>{inspected=route;return {kind:'available',graph};},
+    };
+    await advanceJourneyState(state,{kind:'replan',via:[[127.0005,37.0002]]},walkingConfig,new AbortController().signal,deps);
+    assert.equal(inspected?.id,candidate.id,'the returned geometry must reach graph validation');
+    const restored=journeyStateSchema.parse(JSON.parse(JSON.stringify(state)));
+    assert.equal(restored.candidates.some(route=>route.id===candidate.id),false);
+    assert.equal(projectJourneyResult(restored).routes.some(route=>route.id===candidate.id),false);
+});
+
 test('reroutes load their own graph and retain unavailable coverage through persistence',async t=>{
     mockWalkingProvider(t,groupedCrossingSteps);
     const state=await walkingJourney();
@@ -432,4 +524,30 @@ test('cancellation during graph acquisition aborts journey creation',async t=>{
         controller.abort();
         return {kind:'unavailable',reason:'network'};
     }),{name:'AbortError'});
+});
+
+test('route analysis failure retains its concrete cause and earlier observations without claiming an entrance or physical block',async t=>{
+ mockWalkingProvider(t,groupedCrossingSteps);
+ const state=await walkingJourney(),candidate=state.candidates[0];
+ const [first,sample]=candidate.samples;
+ await observeSample(state,candidate,first);
+ const earlier=structuredClone(state.evidence[candidate.id+':'+first.id]);
+ let saved=false;
+ const deps:JourneyDependencies={
+  streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid=fixture',panoId:'fixture',capturedAt:null,coord:point.coord,heading:point.heading}}),
+  analyzeKhuImage:async()=>{throw new KhuError('ChatKHU 호출 한도에 도달했습니다. 잠시 후 다시 시도해 주세요.',429,{stage:'request',httpStatus:429});},
+  analyzeKhuViews:async()=>{throw Error('unexpected review');},reroute:async()=>{throw Error('unexpected reroute');},
+ };
+ await advanceJourneyState(state,{kind:'capture',route:candidate,sample},walkingConfig,new AbortController().signal,deps,async()=>{saved=true;});
+ const restored=journeyStateSchema.parse(JSON.parse(JSON.stringify(state))),failure=restored.evidence[candidate.id+':'+sample.id];
+ assert.equal(saved,true);
+ assert.equal(restored.phase,'limited');
+ assert.match(restored.notice??'',/경로 사진 분석 중단.*HTTP 429/);
+ assert.doesNotMatch(restored.notice??'',/입구/);
+ assert.equal(failure.failure,'analysis');
+ assert.equal(failure.status,'unknown');
+ assert.equal(failure.finding,undefined);
+ assert.match(failure.reason,/호출 한도.*현장 통행 장애 판정이 아닙니다/);
+ assert.deepEqual(restored.evidence[candidate.id+':'+first.id],earlier);
+ assert.equal(restored.exclusions.some(exclusion=>exclusion.reason==='obstacle'),false);
 });

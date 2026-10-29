@@ -18,8 +18,8 @@ export async function fetchTerrain(coords:Coord[],signal:AbortSignal):Promise<Te
             signal.throwIfAborted();
             const batch=coords.slice(offset,offset+100);
             const locations=batch.map(([lng,lat])=>`${lat},${lng}`).join('|');
-            const response=await fetch('https://api.opentopodata.org/v1/srtm30m?'+new URLSearchParams({locations}),{redirect:'error',cache:'no-store',signal:AbortSignal.any([signal,AbortSignal.timeout(5000)])});
-            if(!response.ok)return {...source,status:'unavailable',reason:'transport'};
+            const response=await fetch('https://api.opentopodata.org/v1/srtm30m?'+new URLSearchParams({locations}),{redirect:'manual',cache:'no-store',signal:AbortSignal.any([signal,AbortSignal.timeout(15000)])});
+            if(!response.ok){console.warn(JSON.stringify({event:'terrain_transport_failed',status:response.status}));return {...source,status:'unavailable',reason:'transport'};}
             const parsed=responseSchema.safeParse(await response.json());
             if(!parsed.success||parsed.data.results.length!==batch.length)return {...source,status:'unavailable',reason:'invalid-response'};
             for(let index=0;index<batch.length;index++){
@@ -34,7 +34,8 @@ export async function fetchTerrain(coords:Coord[],signal:AbortSignal):Promise<Te
             }
         }
         return points.some(point=>point.elevationMeters!==null)?{...source,status:'available',points}:{...source,status:'unavailable',reason:'no-data'};
-    } catch {
+    } catch(error) {
+        console.warn(JSON.stringify({event:'terrain_transport_failed',reason:error instanceof Error?error.name:'unknown'}));
         signal.throwIfAborted();
         return {...source,status:'unavailable',reason:'transport'};
     }

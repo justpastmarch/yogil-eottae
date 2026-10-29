@@ -6,7 +6,7 @@ import {Miniflare} from 'miniflare';
 import {JourneyJobStore,JourneyJobError,readJourney,advanceJourney,cancelJourney,executeJourneyBatch} from '../lib/journey-jobs.ts';
 import {JOURNEY_VERSION,reserveJourneyOperation,advanceJourneyState,projectJourneyResult,journeyStateSchema,type JourneyState,type JourneyDependencies} from '../lib/journey.ts';
 import {samplesFor,summary,type Finding,type Route,type Sample} from '../lib/domain.ts';
-import {ImageryServiceError,type StreetImage} from '../lib/street-imagery.ts';
+import {streetImage,ImageryServiceError,type StreetImage} from '../lib/street-imagery.ts';
 import {runWithServerEnv,type ServerConfig} from '../lib/server-config.ts';
 import type {JointFinding} from '../lib/khu.ts';
 import {saveJourneyCapture} from '../lib/journey-captures.ts';
@@ -635,4 +635,32 @@ test('a map-provided staircase gets an image observation even though its route c
  assert.equal(projectJourneyResult(s).assessments.r.decision.kind,'detour');
  assert.ok(operation?.kind==='capture');assert.deepEqual(operation.sample.coord,sample.coord);
  assert.equal(operation.sample.id,'provider-stairs');
+});
+
+test('a persisted Google choice reports missing imagery instead of using the configured renderer',async t=>{
+ const original=state();original.imageryProvider='google';
+ const s=journeyStateSchema.parse(JSON.parse(JSON.stringify(original))),op=reserveJourneyOperation(s);assert.ok(op?.kind==='capture');
+ t.mock.method(globalThis,'fetch',async(input:string|URL|Request)=>{
+  assert.equal(new URL(String(input)).hostname,'maps.googleapis.com');
+  return Response.json({status:'ZERO_RESULTS'});
+ });
+ await advanceJourneyState(s,op,{...config,rendererUrl:'https://renderer.example/capture',googleStreetViewKey:'test'},new AbortController().signal,{
+  streetImage,analyzeKhuImage:async()=>{throw Error('unexpected AI');},analyzeKhuViews:async()=>{throw Error('unexpected review');},reroute:async()=>{throw Error('unexpected reroute');},
+ });
+ assert.equal(s.evidence[op.route.id+':'+op.sample.id].failure,'missing');
+ assert.equal(projectJourneyResult(s).recommendedId,null);
+});
+test('missing Google key stops the job with setup guidance',async()=>{
+ const s=state();s.imageryProvider='google';const op=reserveJourneyOperation(s);assert.ok(op);
+ await advanceJourneyState(s,op,config,new AbortController().signal,{
+  streetImage:async()=>{throw Error('must not request imagery');},analyzeKhuImage:async()=>{throw Error('unexpected AI');},analyzeKhuViews:async()=>{throw Error('unexpected review');},reroute:async()=>{throw Error('unexpected reroute');},
+ });
+ assert.equal(s.phase,'limited');assert.match(s.notice??'',/GOOGLE_STREET_VIEW_API_KEY/);
+});
+test('Google API failure is distinct from missing imagery',async()=>{
+ const s=state();s.imageryProvider='google';const op=reserveJourneyOperation(s);assert.ok(op);
+ await advanceJourneyState(s,op,{...config,googleStreetViewKey:'test'},new AbortController().signal,{
+  streetImage:async()=>{throw new ImageryServiceError(403);},analyzeKhuImage:async()=>{throw Error('unexpected AI');},analyzeKhuViews:async()=>{throw Error('unexpected review');},reroute:async()=>{throw Error('unexpected reroute');},
+ });
+ assert.equal(s.phase,'limited');assert.match(s.notice??'',/Google 거리영상 API 요청에 실패/);
 });

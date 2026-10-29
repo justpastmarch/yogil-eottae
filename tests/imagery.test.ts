@@ -154,3 +154,91 @@ test('KartaView never fetches an image from an untrusted host or pretends to rot
  assert.equal(await streetImage(sample,kartaConfig,new AbortController().signal,{tilt:20}),null);
  assert.equal(calls,1);
 });
+
+const googleConfig:ServerConfig={...config,imageryProvider:'google',googleStreetViewKey:'private-google-key'};
+const googleMetadata={status:'OK',pano_id:'real-pano-id',location:{lat:37,lng:127.0001},date:'2014-03'};
+const jpeg=()=>new Response(Uint8Array.from([255,216,255,0,0,0]),{headers:{'content-type':'image/jpeg'}});
+test('Google returns the real panorama and frames the target from its camera',async t=>{
+ const requests:URL[]=[];
+ t.mock.method(globalThis,'fetch',async(input:string|URL|Request)=>{
+  const url=new URL(String(input));requests.push(url);
+  assert.equal(url.origin,'https://maps.googleapis.com');
+  return url.pathname.endsWith('/metadata')?Response.json(googleMetadata):jpeg();
+ });
+ const result=await streetImage(sample,googleConfig,new AbortController().signal,{target:[127.001,37],tilt:15,zoom:2});
+ assert.ok(result);
+ assert.deepEqual(result.source.coord,[127.0001,37]);
+ assert.ok(result.source.heading>89&&result.source.heading<91);
+ assert.equal(result.source.panoId,'real-pano-id');
+ assert.equal(result.source.capturedAt,null);
+ assert.equal(result.source.capturedMonth,'2014-03');
+ assert.equal(result.source.tilt,-15);
+ assert.equal(result.source.zoom,2);
+ assert.equal(new URL(result.source.url).hostname,'www.google.com');
+ assert.equal(new URL(result.source.url).searchParams.get('pano'),'real-pano-id');
+ assert.ok(!JSON.stringify(result).includes('private-google-key'));
+ assert.equal(requests.length,2);
+ assert.equal(requests[1].searchParams.get('pano'),'real-pano-id');
+ assert.equal(requests[1].searchParams.get('return_error_code'),'true');
+ assert.equal(requests[1].searchParams.get('pitch'),'-15');
+ assert.equal(requests[1].searchParams.get('fov'),'45');
+ assert.ok(Number(requests[1].searchParams.get('heading'))>89&&Number(requests[1].searchParams.get('heading'))<91);
+});
+test('Google uses the requested heading without a target and never invents capture dates',async t=>{
+ t.mock.method(globalThis,'fetch',async(input:string|URL|Request)=>String(input).includes('/metadata')?Response.json({...googleMetadata,date:'2014-13'}):jpeg());
+ const result=await streetImage({...sample,heading:210},googleConfig,new AbortController().signal);
+ assert.equal(result?.source.heading,210);
+ assert.equal(result?.source.capturedAt,null);
+ assert.equal(result?.source.capturedMonth,undefined);
+});
+test('Google imagery retries a transient metadata failure before returning the image',async t=>{
+ let attempts=0;
+ t.mock.method(globalThis,'fetch',async(input:string|URL|Request)=>{
+  if(String(input).includes('/metadata'))return ++attempts===1?new Response('',{status:502}):Response.json(googleMetadata);
+  return jpeg();
+ });
+ const result=await streetImage(sample,googleConfig,new AbortController().signal);
+ assert.equal(result?.source.panoId,'real-pano-id');
+ assert.equal(attempts,2);
+});
+for(const metadata of [{status:'ZERO_RESULTS'},{...googleMetadata,location:{lat:37.001,lng:127}}])test('Google reports absent coverage without falling back',async t=>{
+ let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;return Response.json(metadata);});
+ assert.equal(await streetImage(sample,googleConfig,new AbortController().signal),null);
+ assert.equal(calls,1);
+});
+for(const [status,expected] of [['REQUEST_DENIED',403],['OVER_QUERY_LIMIT',429],['OVER_DAILY_LIMIT',429],['UNKNOWN_ERROR',502]] as const)test(`Google ${status} is a service error`,async t=>{
+ t.mock.method(globalThis,'fetch',async()=>Response.json({status}));
+ await assert.rejects(streetImage(sample,googleConfig,new AbortController().signal),error=>error instanceof ImageryServiceError&&error.status===expected&&!error.message.includes('private-google-key'));
+});
+test('Google requires its own key and never falls back',async t=>{
+ let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;throw new Error('unexpected request');});
+ await assert.rejects(streetImage(sample,{...googleConfig,googleStreetViewKey:undefined},new AbortController().signal),error=>error instanceof ImageryServiceError&&error.status===401);
+ assert.equal(calls,0);
+});
+for(const metadata of [{...googleMetadata,pano_id:''},{...googleMetadata,location:{lat:95,lng:127}}])test('Google rejects invalid panorama metadata',async t=>{
+ t.mock.method(globalThis,'fetch',async()=>Response.json(metadata));
+ await assert.rejects(streetImage(sample,googleConfig,new AbortController().signal),ImageryServiceError);
+});
+for(const response of [
+ ()=>new Response('forbidden',{status:403}),
+ ()=>new Response('not an image',{headers:{'content-type':'image/jpeg'}}),
+ ()=>new Response(Uint8Array.from([255,216,255,0,0,0]),{headers:{'content-type':'text/html'}}),
+ ()=>new Response(new Uint8Array(4*1024*1024+1),{headers:{'content-type':'image/jpeg'}}),
+])test('Google image failures are errors, not missing coverage',async t=>{
+ t.mock.method(globalThis,'fetch',async(input:string|URL|Request)=>String(input).includes('/metadata')?Response.json(googleMetadata):response());
+ await assert.rejects(streetImage(sample,googleConfig,new AbortController().signal),ImageryServiceError);
+});
+test('Google respects cancellation',async t=>{
+ const controller=new AbortController();controller.abort();
+ t.mock.method(globalThis,'fetch',async(_input:string|URL|Request,init?:RequestInit)=>{init?.signal?.throwIfAborted();return Response.json(googleMetadata);});
+ await assert.rejects(streetImage(sample,googleConfig,controller.signal));
+});
+
+test('storefront search can use a camera beyond the route observation radius without loosening route matching',async t=>{
+ const coord:[number,number]=[127,37.0002];
+ t.mock.method(globalThis,'fetch',async()=>Response.json({image,source:{url:'https://map.kakao.com/?panoid=789',panoId:'789',capturedAt:null,coord,heading:180,tilt:0,zoom:1}}));
+ const options={target:sample.coord,tilt:0,zoom:1};
+ assert.equal(await streetImage(sample,{...config,mapillary:''},new AbortController().signal,options),null);
+ const result=await streetImage(sample,{...config,mapillary:''},new AbortController().signal,{...options,purpose:'place-entrance'});
+ assert.equal(result?.source.panoId,'789');
+});

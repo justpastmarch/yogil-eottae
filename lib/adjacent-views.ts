@@ -18,8 +18,8 @@ export function pointsAwayFromTarget(source:Pick<StreetImage['source'],'coord'|'
 }
 type PanoramaSource=Pick<StreetImage['source'],'url'|'coord'|'capturedAt'|'capturedMonth'|'panoId'>;
 function providerPanoramaIdentity(source:PanoramaSource):string|undefined{
-    if(source.panoId)return 'kakao:'+source.panoId;
     const url=new URL(source.url);
+    if(source.panoId)return (url.hostname==='www.google.com'?'google:':'kakao:')+source.panoId;
     if(url.hostname==='kartaview.org'&&/^\/details\/\d+\/\d+\/?$/.test(url.pathname))return 'kartaview:'+url.pathname;
     const kakao=url.searchParams.get('panoid'),mapillary=url.searchParams.get('pKey');
     return kakao?'kakao:'+kakao:mapillary?'mapillary:'+mapillary:undefined;

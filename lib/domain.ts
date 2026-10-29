@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type {TerrainProfile} from './elevation.ts';
+import type {RouteGrade} from './route-grade.ts';
 
 export type Coord=[longitude:number,latitude:number];
 export const placeSchema=z.object({
@@ -64,9 +64,10 @@ export type Route = {
     crossingSources?:{provider:'openstreetmap';snapshotAt:string;wayIds:number[];along:number}[];
     graphCoverage?:{status:'available'|'unavailable';reason?:'not-configured'|'network'|'incomplete'|'too-large'|'no-data';snapshotAt?:string};
     graphSegment?:{provider:'openstreetmap';snapshotAt:string;startGapMeters:number;endGapMeters:number;sharedRoadMeters:number};
-    terrain?: TerrainProfile;
+    grade?: RouteGrade;
+    crossingChoice?: {id:string;label:string;wayIds:number[]};
 };
-export type RouteBarrier={sampleId:string;coord:Coord;along:number;reason:string;source?:'provider'|'imagery'};
+export type RouteBarrier={sampleId:string;coord:Coord;along:number;reason:string;source?:'provider'|'imagery'|'osm'};
 export type BlockedPassage = {
     id: string;
     routeId: string;
@@ -184,7 +185,7 @@ export function evaluateRoute(route:Route,evidence:Record<string,Evidence>,block
         if(index>=0&&issues[index].status==='blocked'&&issues[index].source==='imagery')continue;
         const item=evidence[route.id+':'+barrier.sampleId];
         const verification=item?.failure?'영상 확보·판독을 완료하지 못했습니다.':item?.finding?'현재 영상에서는 이 계단을 확인하지 못했습니다.':item?(exploration.state==='searching'?'영상 확인을 진행 중이며, 계단을 확인한 결과는 아직 없습니다.':'영상 판독을 마치지 못한 상태로 처리가 종료됐습니다.'):'이 지점의 영상 판독은 아직 시작하지 않았습니다.';
-        const point:RouteIssue={id:route.id+':'+barrier.sampleId,sampleId:barrier.sampleId,coord:barrier.coord,along:barrier.along,status:'blocked',source:barrier.source??'provider',reason:barrier.source==='imagery'?barrier.reason:barrier.reason+' '+verification,action:barrier.source==='imagery'?'같은 통로에서 영상으로 관찰한 장애 때문에 이 경로를 추천에서 제외했습니다.':'길찾기의 계단 안내 때문에 안전상 추천에서 제외합니다. 사진에서 장애를 확인했다는 뜻은 아니며, 실제 영상 판독은 별도로 표시합니다.'};
+        const point:RouteIssue={id:route.id+':'+barrier.sampleId,sampleId:barrier.sampleId,coord:barrier.coord,along:barrier.along,status:'blocked',source:barrier.source??'provider',reason:barrier.source==='imagery'||barrier.source==='osm'?barrier.reason:barrier.reason+' '+verification,action:barrier.source==='imagery'?'같은 통로에서 영상으로 관찰한 장애 때문에 이 경로를 추천에서 제외했습니다.':barrier.source==='osm'?'보행망 지도의 계단·접근 제한 때문에 이 통로를 피하는 후보를 비교합니다. 영상으로 확인한 장애와는 구분합니다.':'길찾기의 계단 안내 때문에 안전상 추천에서 제외합니다. 사진에서 장애를 확인했다는 뜻은 아니며, 실제 영상 판독은 별도로 표시합니다.'};
         if(index<0)issues.push(point);else issues[index]=point;
     }
     for(const crossing of route.unresolvedCrossings??[])issues.push({id:route.id+':'+crossing.id,sampleId:crossing.id,coord:crossing.coord,along:crossing.along,status:'unknown',source:crossing.source??'provider',reason:crossing.source==='osm'?'OpenStreetMap에서 횡단 선형을 발견했지만 이 경로의 횡단 연결부를 확정하지 못했습니다.':`${crossing.count}개 횡단보도의 필요한 연결부 위치를 지도 안내만으로 모두 확정할 수 없습니다.`,action:'일부 평탄한 노면만으로 이 횡단 전체를 통과 처리하지 않습니다. 연결부를 확인하거나 이 교차로를 피하는 대안을 비교해야 합니다.'});
@@ -192,7 +193,7 @@ export function evaluateRoute(route:Route,evidence:Record<string,Evidence>,block
     issues.sort((a,b)=>a.along-b.along);
     const firstBlocked=issues.find(issue=>issue.status==='blocked');
     if(blockedPassageIds.length||firstBlocked){
-        const reason=firstBlocked?`${Math.round(firstBlocked.along)}m 지점 · ${firstBlocked.source==='provider'?'지도 경로 안내 (영상 판독 결과 아님)':'거리영상 관찰'}: ${firstBlocked.reason}`:'다른 후보에서 확인한 장애 통로와 겹쳐 이 경로의 접근성 안내를 막았습니다.';
+        const reason=firstBlocked?`${Math.round(firstBlocked.along)}m 지점 · ${firstBlocked.source==='provider'?'지도 경로 안내 (영상 판독 결과 아님)':firstBlocked.source==='osm'?'보행망 지도 정보 (영상 판독 결과 아님)':'거리영상 관찰'}: ${firstBlocked.reason}`:'다른 후보에서 확인한 장애 통로와 겹쳐 이 경로의 접근성 안내를 막았습니다.';
         return {kind:'detour',reason,action:exploration.state==='searching'?'이 통로를 피하는 다른 경로를 조회하고 있습니다.':exploration.reason,issues,exploration};
     }
     if(maxSlope!=null)return {kind:'hold',reason:`요청한 최대 경사율 ${maxSlope}%를 확인할 정밀 보행면 측정 자료가 없습니다.`,action:'수치 경사 제한을 충족한 경로로 추천할 수 없습니다.',issues,exploration};
