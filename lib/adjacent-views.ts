@@ -2,6 +2,7 @@ import {bearing,meters,type EvidenceSource,type Route,type Sample} from './domai
 import {pointAt,routeImageContext} from './route-context.ts';
 import {streetImage,ImageryServiceError,type StreetImage} from './street-imagery.ts';
 import type {ServerConfig} from './server-config.ts';
+import {kakaoPanoramaId,naverPanoramaId} from './roadview-source.ts';
 
 export function adjacentSamples(route:Route,sample:Sample):{id:string;sample:Sample}[]{
     const length=route.coords.slice(1).reduce((total,coord,index)=>total+meters(route.coords[index],coord),0);
@@ -16,22 +17,27 @@ export function pointsAwayFromTarget(source:Pick<StreetImage['source'],'coord'|'
     const difference=Math.abs(((source.heading-bearing(source.coord,target.coord)+540)%360)-180);
     return difference>80;
 }
-type PanoramaSource=Pick<StreetImage['source'],'url'|'coord'|'capturedAt'|'capturedMonth'|'panoId'>;
+type PanoramaSource=Pick<StreetImage['source'],'url'|'coord'|'capturedAt'|'capturedMonth'|'panoId'|'provider'>;
 function providerPanoramaIdentity(source:PanoramaSource):string|undefined{
     const url=new URL(source.url);
-    if(source.panoId)return (url.hostname==='www.google.com'?'google:':'kakao:')+source.panoId;
+    const naver=naverPanoramaId(source);
+    if(naver!==null)return 'naver:'+naver;
+    const kakao=kakaoPanoramaId(source);
+    if(kakao!==null)return 'kakao:'+kakao;
+    if(url.protocol!=='https:'||url.username||url.password||url.port)return undefined;
+    if(url.hostname==='www.google.com'&&source.panoId&&url.searchParams.get('pano')===source.panoId)return 'google:'+source.panoId;
     if(url.hostname==='kartaview.org'&&/^\/details\/\d+\/\d+\/?$/.test(url.pathname))return 'kartaview:'+url.pathname;
-    const kakao=url.searchParams.get('panoid'),mapillary=url.searchParams.get('pKey');
-    return kakao?'kakao:'+kakao:mapillary?'mapillary:'+mapillary:undefined;
+    const mapillary=url.hostname==='www.mapillary.com'?url.searchParams.get('pKey'):null;
+    return mapillary?'mapillary:'+mapillary:undefined;
 }
 export function panoramaIdentity(source:PanoramaSource):string{
     return providerPanoramaIdentity(source)??`${new URL(source.url).hostname}:${source.coord.join(',')}:${source.capturedMonth??source.capturedAt}`;
 }
 export function hasIndependentPanorama(a:PanoramaSource,b:PanoramaSource):boolean{
     const first=providerPanoramaIdentity(a),second=providerPanoramaIdentity(b);
-    return first!==undefined&&second!==undefined&&first!==second&&meters(a.coord,b.coord)>=1;
+    return first!==undefined&&second!==undefined&&first.split(':',1)[0]===second.split(':',1)[0]&&first!==second&&meters(a.coord,b.coord)>=1;
 }
-export function viewIdentity(source:StreetImage['source']):string{return `${panoramaIdentity(source)}:${Math.round(source.heading)}:${source.tilt??7}:${source.zoom??0}`;}
+export function viewIdentity(source:StreetImage['source']):string{return `${panoramaIdentity(source)}:${Math.round(source.heading)}:${source.tilt??'unknown'}:${source.fov??`preset-${source.zoom??'unknown'}`}`;}
 export async function captureAdjacentViews({route,sample,limit,config,signal,reason='occlusion',initialSource,capture=streetImage,onView}:{route:Route;sample:Sample;limit:number;config:ServerConfig;signal:AbortSignal;reason?:'framing'|'occlusion'|'corridor-uncertain';initialSource?:EvidenceSource;capture?:typeof streetImage;onView?:(view:{id:string;image:StreetImage})=>Promise<void>}){
     const targetHeading=initialSource&&meters(initialSource.coord,sample.coord)>0.5?bearing(initialSource.coord,sample.coord):initialSource?.heading??sample.heading;
     const opposed=Math.abs(((sample.heading-targetHeading+540)%360)-180)>100;

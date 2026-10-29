@@ -52,7 +52,7 @@ try{
  await page.waitForFunction(()=>{
   const progress=document.querySelector('.progress')?.textContent??'';
   return /판독 완료\s+[1-9]/.test(progress)||!!document.querySelector('.route-analysis-notice');
- },{timeout:240000});
+ },null,{timeout:240000});
  if(await page.getByRole('button',{name:'중지',exact:true}).isVisible())await page.getByRole('button',{name:'중지',exact:true}).click();
  const journey=responses.at(-1);
  assert.ok(journey,'A real route response is required');

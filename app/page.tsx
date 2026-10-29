@@ -280,7 +280,7 @@ export default function Page() {
  <div className="profile-row"><label htmlFor="goal"><MapPin size={17}/> 도착 범위</label><select id="goal" value={goal} onChange={event=>{const value=event.target.value;if(value==='arrival'||value==='entrance'){reset();setGoal(value);}}}><option value="arrival">지도 도착 지점까지</option><option value="entrance">건물 출입구 진입까지 확인</option></select></div>
  <div className="profile-row"><label htmlFor="imagery"><Eye size={17}/> 거리 이미지</label><select id="imagery" value={imageryProvider} onChange={event=>{const value=event.target.value;if(value==='configured'||value==='kartaview'||value==='google'){reset();setImageryProvider(value);}}}><option value="configured">기존 설정</option><option value="kartaview">KartaView · 연구용</option><option value="google">Google Street View · 연구용</option></select></div>
  {imageryProvider==='kartaview'&&<p className="subnote">KartaView는 일부 지역의 과거 사진만 제공합니다. 사진이 없는 구간은 판독할 수 없으며, 서비스 제공 전 이용 허락 확인이 필요합니다.</p>}
- {imageryProvider==='google'&&<p className="subnote">Google Street View는 연구용 선택입니다. Google 약관은 영상의 저장과 파생 데이터 생성을 제한하며 Google 이외의 지도와 같은 화면에 표시하는 것을 금지합니다. 이 앱은 Kakao 지도를 사용하고 이미지와 분석 결과를 저장하므로 사용 전에 약관과 권한을 직접 확인하세요. 이 선택은 사용 권한을 부여하지 않습니다.</p>}
+ {imageryProvider==='google'&&<p className="subnote">Google Street View는 연구용 선택입니다. Google 약관은 영상의 저장과 파생 데이터 생성을 제한하며 Google 이외의 지도와 같은 화면에 표시하는 것을 금지합니다. 이 앱은 네이버 지도를 사용하고 이미지와 분석 결과를 저장하므로 사용 전에 약관과 권한을 직접 확인하세요. 이 선택은 사용 권한을 부여하지 않습니다.</p>}
  <p className="subnote">계단을 피하는 공통 기준으로 비교합니다. 경사 수치는 지형고도 추정이며 보행면 실측값이 아닙니다.</p>
  </details>
  {end&&!journey&&<DestinationInfo place={end}/>}

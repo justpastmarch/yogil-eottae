@@ -1,25 +1,25 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {setImmediate} from 'node:timers/promises';
-import {streetImage,ImageryServiceError} from '../lib/street-imagery.ts';
+import {streetImage,ImageryServiceError,type StreetImage} from '../lib/street-imagery.ts';
 import type {ServerConfig} from '../lib/server-config.ts';
 import type {Sample} from '../lib/domain.ts';
 const sample:Sample={id:'s0',coord:[127,37],heading:0,along:0,critical:true};
 const config:ServerConfig={routing:{kind:'kakao',restKey:'test'},ai:'test',model:'gemini-test',mapillary:'test',rendererUrl:'https://renderer.example/capture',rendererToken:'test'};
 const image={mime:'image/jpeg',data:'/9j/AAAA'};
-for(const failure of ['transport','unavailable','misaligned','missing'])test(`Mapillary remains available when renderer imagery is ${failure}`,async()=>{
- const original=globalThis.fetch;
- globalThis.fetch=async(input)=>{
-  const url=String(input);
-  if(url===config.rendererUrl){
-   if(failure==='transport')throw new TypeError('fetch failed');
-   if(failure==='unavailable')return new Response('',{status:502});
-   return Response.json(failure==='missing'?null:{image,source:{url:'https://map.kakao.com/',capturedAt:Date.now()-1000,coord:failure==='misaligned'?[127.1,37]:sample.coord,heading:0}});
-  }
-  if(url.startsWith('https://graph.mapillary.com/images?'))return Response.json({data:[{id:'actual-external-contract-fixture',geometry:{coordinates:sample.coord},captured_at:Date.now()-1000,thumb_1024_url:'https://images.mapillary.com/test.jpg',compass_angle:0,is_pano:false}]});
-  return new Response(Uint8Array.from([255,216,255,0,0,0]),{headers:{'content-type':'image/jpeg'}});
- };
- try{const result=await streetImage(sample,config,new AbortController().signal);assert.match(result?.source.url??'',/mapillary.com/);}finally{globalThis.fetch=original;}
+const naverSource=(panoId:string,changes:Partial<StreetImage['source']>={}):StreetImage['source']=>({
+ provider:'naver',url:`https://viewer.map.naver.com/panorama?id=${panoId}&heading=0&tilt=0&fov=90`,panoId,capturedAt:null,coord:sample.coord,heading:0,tilt:0,fov:90,zoom:0,...changes,
+});
+for(const failure of ['transport','unavailable','misaligned','legacy-provider'])test(`configured NAVER renderer ${failure} is never hidden by Mapillary`,async t=>{
+ let alternateCalls=0;
+ t.mock.method(globalThis,'fetch',async(input:string|URL|Request)=>{
+  if(String(input)!==config.rendererUrl){alternateCalls++;throw new Error('Unexpected alternate provider');}
+  if(failure==='transport')throw new TypeError('fetch failed');
+  if(failure==='unavailable')return new Response('',{status:502});
+  return Response.json({image,source:failure==='legacy-provider'?{url:'https://map.kakao.com/?panoid=1',panoId:'1',capturedAt:null,coord:sample.coord,heading:0}:naverSource('misaligned',{coord:[127.1,37]})});
+ });
+ await assert.rejects(streetImage(sample,config,new AbortController().signal),error=>error instanceof ImageryServiceError&&error.status===(failure==='unavailable'?502:503));
+ assert.equal(alternateCalls,0);
 });
 for(const status of [401,403,404])test(`renderer ${status} is not retried or hidden by a fallback`,async()=>{
  const original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return new Response('',{status});};
@@ -29,18 +29,27 @@ for(const status of [401,403,404])test(`renderer ${status} is not retried or hid
 for(const failure of ['transport','server-error'])test(`renderer ${failure} without fallback reports an outage rather than absent coverage`,async()=>{
  const original=globalThis.fetch;
  globalThis.fetch=async()=>{if(failure==='transport')throw new TypeError('fetch failed');return new Response('',{status:502});};
- try{await assert.rejects(streetImage(sample,{...config,mapillary:''},new AbortController().signal),error=>error instanceof ImageryServiceError&&error.status===503);}finally{globalThis.fetch=original;}
+ try{await assert.rejects(streetImage(sample,{...config,mapillary:''},new AbortController().signal),error=>error instanceof ImageryServiceError&&error.status===(failure==='server-error'?502:503));}finally{globalThis.fetch=original;}
 });
 test('a successful renderer null means absent local coverage, not a service outage',async()=>{
- const original=globalThis.fetch;globalThis.fetch=async()=>Response.json(null);
- try{assert.equal(await streetImage(sample,{...config,mapillary:''},new AbortController().signal),null);}finally{globalThis.fetch=original;}
+ const original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json(null);};
+ try{assert.equal(await streetImage(sample,config,new AbortController().signal),null);assert.equal(calls,1);}finally{globalThis.fetch=original;}
 });
-test('older renderer imagery remains available for dated historical observation',async t=>{
- const capturedAt=Date.now()-400*86400000;
- t.mock.method(globalThis,'fetch',async()=>Response.json({image,source:{url:'https://map.kakao.com/?panoid=older',panoId:'older',capturedAt,coord:sample.coord,heading:0}}));
+test('actual NAVER camera metadata survives the renderer boundary for archived observation',async t=>{
+ const source=naverSource('opaque-old-camera',{capturedMonth:'2024-06'});
+ t.mock.method(globalThis,'fetch',async()=>Response.json({image,source}));
  const result=await streetImage(sample,{...config,mapillary:''},new AbortController().signal);
- assert.equal(result?.source.capturedAt,capturedAt);
- assert.equal(result?.source.panoId,'older');
+ assert.deepEqual(result?.source,source);
+});
+for(const changes of [
+ {provider:undefined},{fov:undefined},{tilt:undefined},
+ {url:'https://viewer.map.naver.com/panorama?id=wrong&heading=0&tilt=0&fov=90'},
+ {url:'https://viewer.map.naver.com/panorama?id=actual&heading=0&tilt=0&fov=60'},
+])test('configured capture rejects incomplete or contradictory NAVER camera provenance',async t=>{
+ let requests=0;
+ t.mock.method(globalThis,'fetch',async()=>{requests++;return Response.json({image,source:naverSource('actual',changes)});});
+ await assert.rejects(streetImage(sample,config,new AbortController().signal),ImageryServiceError);
+ assert.equal(requests,1);
 });
 test('older Mapillary imagery is retained when it is the available source',async t=>{
  const capturedAt=Date.now()-400*86400000;
@@ -58,7 +67,7 @@ test('a temporary renderer failure is retried and returns the real renderer imag
  t.mock.method(globalThis,'fetch',async()=>{
   attempts++;
   if(attempts===1)return new Response('',{status:502});
-  return Response.json({image,source:{url:'https://map.kakao.com/?panoid=123',panoId:'123',capturedAt:Date.now()-1000,coord:sample.coord,heading:0}});
+  return Response.json({image,source:naverSource('123')});
  });
  const result=await streetImage(sample,{...config,mapillary:''},new AbortController().signal);
  assert.equal(result?.source.panoId,'123');
@@ -70,7 +79,7 @@ test('a disconnected response body is retried instead of being reported as a rou
  t.mock.method(globalThis,'fetch',async()=>{
   attempts++;
   if(attempts===1)return new Response(new ReadableStream({start(controller){controller.error(new TypeError('connection lost'));}}));
-  return Response.json({image,source:{url:'https://map.kakao.com/?panoid=456',panoId:'456',capturedAt:Date.now()-1000,coord:sample.coord,heading:0}});
+  return Response.json({image,source:naverSource('456')});
  });
  const result=await streetImage(sample,{...config,mapillary:''},new AbortController().signal);
  assert.equal(result?.source.panoId,'456');
@@ -91,7 +100,7 @@ for(const status of [429,503])test(`renderer ${status} is retried after capacity
  t.mock.method(globalThis,'fetch',async()=>{
   attempts++;
   if(attempts===1){started.resolve();return new Response('',{status});}
-  return Response.json({image,source:{url:'https://map.kakao.com/?panoid=789',panoId:'789',capturedAt:Date.now()-1000,coord:sample.coord,heading:0}});
+  return Response.json({image,source:naverSource('789')});
  });
  const pending=streetImage(sample,{...config,mapillary:''},new AbortController().signal);
  await started.promise;await setImmediate();t.mock.timers.tick(5000);
@@ -172,7 +181,7 @@ test('Google returns the real panorama and frames the target from its camera',as
  assert.equal(result.source.panoId,'real-pano-id');
  assert.equal(result.source.capturedAt,null);
  assert.equal(result.source.capturedMonth,'2014-03');
- assert.equal(result.source.tilt,-15);
+ assert.equal(result.source.tilt,15);
  assert.equal(result.source.zoom,2);
  assert.equal(new URL(result.source.url).hostname,'www.google.com');
  assert.equal(new URL(result.source.url).searchParams.get('pano'),'real-pano-id');
@@ -236,9 +245,14 @@ test('Google respects cancellation',async t=>{
 
 test('storefront search can use a camera beyond the route observation radius without loosening route matching',async t=>{
  const coord:[number,number]=[127,37.0002];
- t.mock.method(globalThis,'fetch',async()=>Response.json({image,source:{url:'https://map.kakao.com/?panoid=789',panoId:'789',capturedAt:null,coord,heading:180,tilt:0,zoom:1}}));
+ const distances:number[]=[];
+ t.mock.method(globalThis,'fetch',async(_input:string|URL|Request,init?:RequestInit)=>{
+  distances.push(JSON.parse(String(init?.body)).maxDistance);
+  return Response.json({image,source:naverSource('789',{url:'https://viewer.map.naver.com/panorama?id=789&heading=180&tilt=0&fov=60',coord,heading:180,fov:60,zoom:1})});
+ });
  const options={target:sample.coord,tilt:0,zoom:1};
- assert.equal(await streetImage(sample,{...config,mapillary:''},new AbortController().signal,options),null);
+ await assert.rejects(streetImage(sample,{...config,mapillary:''},new AbortController().signal,options),ImageryServiceError);
  const result=await streetImage(sample,{...config,mapillary:''},new AbortController().signal,{...options,purpose:'place-entrance'});
  assert.equal(result?.source.panoId,'789');
+ assert.deepEqual(distances,[20,60]);
 });

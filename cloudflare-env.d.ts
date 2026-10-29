@@ -1,6 +1,6 @@
 declare namespace Cloudflare {
   interface Env {
-    KAKAO_JAVASCRIPT_KEY?: string;
+    NAVER_MAP_CLIENT_ID?: string;
     KAKAO_REST_API_KEY?: string;
     TMAP_API_KEY?: string;
     CHATKHU_API_KEY?: string;

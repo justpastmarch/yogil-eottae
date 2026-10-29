@@ -1,34 +1,57 @@
 # Roadview renderer
 
-Private Node service that captures an actual Kakao Roadview through an isolated Playwright browser. The application selects a panorama with its official Kakao SDK route, then this service opens that panorama in the official Kakao viewer and captures the visible page, including its attribution. Images stay in memory and are returned to the caller. Browser profiles, cookies, traces, videos, and screenshots are never reused or deliberately saved.
+Private Node service that captures the native Naver Panorama SDK in an isolated Playwright browser. The application page uses `publicMapConfig().clientId` directly, independently of AI and walking configuration. The renderer stays on `/internal/roadview` and captures the SDK scene with its native Naver attribution. It does not navigate a consumer map site or use Kakao imagery. Images stay in memory; browser profiles, cookies, traces, videos, and screenshots are not reused or deliberately saved.
 
-Requires Node 22+ and a browser. Install this package with `npm ci`. For local macOS use `ROADVIEW_BROWSER_CHANNEL=chrome` to launch installed Google Chrome. Otherwise install the package's Chromium with `npx playwright install chromium`, or use the supplied Dockerfile, whose browser image matches the pinned Playwright version.
+## Runtime configuration
 
-Set process environment before `npm start`:
+The service requires Node 22+ and a browser. Dependencies install with `npm ci`. `ROADVIEW_BROWSER_CHANNEL=chrome` selects installed Google Chrome on macOS. Without a channel, Playwright uses its Chromium installation from `npx playwright install chromium`. The supplied Dockerfile uses a browser image that matches the pinned Playwright version.
 
 | Variable | Meaning |
 | --- | --- |
-| `ROADVIEW_RENDERER_TOKEN` | Required bearer secret, at least 24 characters. Supply through process environment or a deployment secret manager. |
+| `ROADVIEW_RENDERER_TOKEN` | Required bearer secret, at least 24 characters. |
 | `ROADVIEW_APP_ORIGIN` | Application origin, defaults to `http://localhost:3000`. HTTPS required except localhost, 127.0.0.1, or ::1. Paths and credentials are rejected. |
 | `ROADVIEW_APP_ACCESS_TOKEN` | Optional private Sites application token. Sent as `OAI-Sites-Authorization: Bearer …` only to the exact configured application origin. |
 | `ROADVIEW_BROWSER_CHANNEL` | Optional installed browser channel, such as `chrome`. Omit in Docker. |
 | `HOST` | Defaults to `127.0.0.1`; `0.0.0.0` or `::1` can be explicitly configured. Docker uses `0.0.0.0`. |
 | `PORT` | Defaults to `3101`. |
 
-Do not put secrets in files or client application bundles. Keep this service private behind the application server. Production application origin and its allowed Kakao SDK domain must match.
+`npm start` starts the service with these process environment values. Secrets belong in the process environment or a deployment secret manager, not files or client bundles. The service is private behind the application server. The application needs a valid `NAVER_MAP_CLIENT_ID`, enabled Naver map service, and an allowed SDK domain that matches its origin.
+
+## HTTP contract
 
 `GET /health` returns `{ "ok": true }` without authentication.
 
-`POST /capture` requires `Authorization: Bearer <ROADVIEW_RENDERER_TOKEN>` and JSON `{ "coord": [127.078, 37.307], "heading": 7 }`, optionally with `"target": [longitude, latitude]` within 60 metres, `"tilt": 25` and `"zoom": 1`. Target aiming uses the actual panorama coordinate. Heading is finite and at least 0 and below 360; tilt is finite from -45 to 45; zoom is an integer from 0 to 2. Kakao tilt increases downward: the default is 7, recovery uses 15 or 25. This was checked against the visible official viewer and [Viewpoint documentation](https://apis.map.kakao.com/web/documentation/#Viewpoint). No caller-supplied URL is accepted.
+`POST /capture` requires `Authorization: Bearer <ROADVIEW_RENDERER_TOKEN>` and JSON with `coord: [longitude, latitude]` and `heading`. No caller-supplied URL is accepted.
 
-The application must implement `GET /internal/roadview?lng=...&lat=...&heading=...` and publish JSON in DOM element `#capture-state`. A successful state is `{ "status": "ready", "panoId": "1212598057", "coord": [127.078,37.307], "heading": 7 }`; missing imagery uses `{ "status": "missing" }`, and failures use `{ "status": "error" }`. Coordinates and heading describe the actual SDK panorama, not an estimated replacement.
+| Field | Values |
+| --- | --- |
+| `coord` | Two finite numbers within longitude and latitude bounds. The application SDK page accepts the Korean map area, longitude 124–132 and latitude 33–40. |
+| `heading` | Finite degrees, at least 0 and below 360. |
+| `target` | Optional coordinate within 60 metres of `coord`. The target bearing is computed from the actual selected camera coordinate. |
+| `tilt` | Finite degrees from -45 to 45; defaults to 7. Canonical tilt increases downward. Native Naver tilt has the opposite sign. |
+| `zoom` | Integer request framing preset 0, 1, or 2; defaults to 0. These request native fields of view of 90, 60, and 40 degrees, respectively. They are not Naver zoom levels. |
+| `maxDistance` | 20 or 60 metres; defaults to 20. The actual panorama camera must fall within this distance of `coord`. Entrance captures use 60. |
 
-A successful response includes `image: {mime, data}` and `source: {capturedAt, capturedMonth?, coord, heading, tilt, zoom, panoId, url}`. The month is read from visible official viewer text; it is omitted when unavailable. No day or exact capture timestamp is inferred. Missing SDK imagery returns JSON `null`. Camera tilt and zoom accompany the image so a different viewpoint cannot be mistaken for the same evidence.
+The application implements `GET /internal/roadview?lng=...&lat=...&heading=...&tilt=...&zoom=...&maxDistance=...`. Its optional `target` query parameter is a JSON coordinate. This page validates every camera field and serializes only the validated controls and public SDK identifier into HTML. It loads one Naver SDK script with the panorama submodule. SDK construction runs in a microtask after the callback because constructors can become available after the callback returns. The container has explicit viewport dimensions and calls `Panorama.setSize()`.
 
-The service verifies the panorama identifier in the official viewer URL, waits for a visible viewer and completed Roadview image responses, and captures a 1280×800 JPEG. It enables software WebGL for headless rendering and checks the central screenshot pixels for a painted scene, rejecting blank or almost black captures. It does not derive images or dates from private application JavaScript. Changes to Kakao's viewer DOM or image host may make a capture unavailable and require updating these checks.
+The page publishes JSON in `#capture-state`. A successful state contains `status: "ready"`, the actual opaque `panoId`, `coord`, canonical `heading` and `tilt`, actual `fov`, and optional `capturedMonth`. Ready means the native camera matches the requested framing. `window.__readCaptureState()` recomputes that state from the SDK rather than returning cached event metadata.
 
-At most two captures run concurrently; excess requests return 429. Bodies are limited to 2 KiB. Navigation has a 20 second timeout and the complete request a 30 second deadline. Client disconnects close the browser context. Invalid input returns 400, invalid authentication 401, and capture failures 502 with a generic error that excludes credentials and private URLs. Server logs record only the failure stage and a coarse reason; they do not include request coordinates, credentials, viewer URLs or image bytes.
+A camera outside `maxDistance` publishes `{ "status": "missing", "reason": "distance" }` and returns JSON `null` from the renderer. Native `pano_status: "ERROR"` is a lookup failure, not proof of absent coverage. SDK authentication uses the separate `navermap_authFailure` callback. Errors publish `{ "status": "error", "code": "auth" | "lookup" | "sdk" | "metadata" }`.
 
-Run `npm test` for contract and boundary checks. Actual imagery verification also requires the application SDK route, valid configured Kakao key/domain, and network access to Kakao. The renderer intentionally has no account setup, deployment, or public hosting automation.
+A successful capture returns `image: {mime: "image/jpeg", data: "<base64>"}` and `source: {provider: "naver", capturedAt: null, capturedMonth?, coord, heading, tilt, zoom, fov, panoId, url}`. Coordinates and pose describe the actual native camera. `zoom` retains only the request preset. The original URL uses the observed official format `https://viewer.map.naver.com/panorama?id=<actual-id>&heading=<native-pan>&tilt=<native-tilt>&fov=<actual-fov>`.
 
-Recovery distinguishes framing from occlusion. For framing, the app derives the target bearing from the original actual camera position and requests rotated views at that camera coordinate; the SDK still selects the available panorama. For occlusion or corridor mismatch it captures route-ordered current, 12 m before and 12 m after points aimed at the original target. Both paths share a 110 second capture deadline and at most two active captures; the app does not overlap this operation with ordinary capture batches. Each image request retries transient transport errors, HTTP 408, 429 and 5xx up to three attempts within its 90 second acquisition budget. Authentication errors and genuine missing imagery do not trigger retries. Losing screenshot ownership cancels remaining review captures. The app stores successful images separately with the job's expiry; this renderer does not persist images. Same-panorama rotation may resolve framing only when the original target is directly visible; it is never independent physical-view evidence for an occluded connection. Capture dates are retained when available, not used as a one-year review cutoff. An undated or older image describes only its capture, not current conditions. Different capture months do not establish current vehicle absence.
+`capturedMonth` comes only from SDK `getLocation().photodate`. Accepted representations are an unambiguous `YYYY-MM` or the observed `YYYY-MM-DD HH:mm:ss`. Calendar dates and time fields must be valid. Future months and dates after today's UTC day are omitted. The SDK does not document its shooting-date timezone, so no exact timestamp or day-precision evidence is inferred. `capturedAt` remains `null`.
+
+## Capture checks and failures
+
+The renderer attaches network listeners before page navigation. It accepts panorama textures only from `panorama.pstatic.net/image/<actual-panoId>/...`, decodes the completed image bodies, and requires at least two distinct images with both dimensions at least 512 pixels. Static UI assets and textures for another panorama do not satisfy readiness. All observed panorama requests must settle, and texture activity must remain unchanged for at least 500 milliseconds.
+
+The service captures a 1280×800 JPEG after two animation frames. It checks the native panorama identifier, coordinate, actual pose, and date metadata immediately before and after the screenshot. It also rechecks texture readiness after capture and rejects central screenshot pixels that are almost black or lack scene color variation. Native credits remain visible in the captured page. Changes to Naver SDK events, image hosts, or texture layouts can make captures unavailable rather than silently produce replacement imagery.
+
+At most two captures run concurrently; excess requests return 429. Bodies are limited to 2 KiB. Navigation has a 20 second timeout, and the complete request has a 30 second deadline. Client disconnects and cancellation close the browser context, including cancellation while a context is being created.
+
+Invalid input returns 400; invalid renderer bearer authentication returns 401. Native SDK authentication failure returns 403. An application navigation response of 503 remains 503. Lookup, paint, texture, and other capture failures return 502, never JSON `null`. Error responses exclude credentials and private URLs. Server logs contain only the failure stage and a coarse reason, not coordinates, credentials, viewer URLs, or image bytes.
+
+`npm test` runs contract and request-policy checks. Live imagery checks also need the application SDK page, a valid configured Naver client and domain, and network access to Naver. The renderer has no account setup, deployment, or public hosting automation.
+
+The application distinguishes framing recovery from occlusion recovery. Framing requests keep the actual camera coordinate and aim at the target with adjusted canonical camera controls. Occlusion recovery uses route-ordered current, 12 metre before, and 12 metre after points aimed at the original target. These application operations share their own capture deadline and concurrency limits; they do not change the renderer's per-request deadline or the actual-camera provenance contract.

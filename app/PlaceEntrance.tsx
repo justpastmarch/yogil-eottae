@@ -4,6 +4,8 @@ import Image from 'next/image';
 import {useEffect,useRef,useState} from 'react';
 import type {Coord,Place} from '../lib/domain.ts';
 import {entranceResponseSchema,type EntranceResponse} from '../lib/place-entrance.ts';
+import {imageryProviderLabel,naverPanoramaPose} from '../lib/roadview-source.ts';
+import PanoramaModal from './PanoramaModal';
 
 export type Props={place:Place;onLocate?:(coord:Coord)=>void};
 type Photo=Omit<EntranceResponse['evidence'][number],'image'>&{photoUrl:string};
@@ -35,12 +37,14 @@ function entranceSummary(result:Result){
 
 export default function PlaceEntrance({place,onLocate}:Props){
     const [state,setState]=useState<State>({kind:'idle'});
+    const [activePanorama,setActivePanorama]=useState<Photo['source']|null>(null);
     const request=useRef<AbortController|null>(null);
     const sequence=useRef(0);
     const urls=useRef<string[]>([]);
     const placeKey=JSON.stringify([place.id,place.name,place.coord]);
     useEffect(()=>{
         setState({kind:'idle'});
+        setActivePanorama(null);
         return ()=>{
             sequence.current++;
             request.current?.abort();
@@ -116,13 +120,15 @@ export default function PlaceEntrance({place,onLocate}:Props){
                 {current.result.evidence.map((photo,index)=><figure key={photo.id}>
                     <a href={photo.source.url} target="_blank" rel="noopener noreferrer" aria-label={`입구 거리 사진 ${index+1} 원본 위치 보기`}><Image src={photo.photoUrl} alt={`${place.name} 입구 확인용 실제 거리 사진 ${index+1}`} width={640} height={640} unoptimized style={{maxWidth:'100%',height:'auto'}}/></a>
                     <figcaption>
-                        <p>촬영 시점 {photo.source.capturedMonth??(photo.source.capturedAt===null?'미제공':new Date(photo.source.capturedAt).toISOString().slice(0,10))}</p>
+                        <p>{imageryProviderLabel(photo.source)} · 촬영 시점 {photo.source.capturedMonth??(photo.source.capturedAt===null?'미제공':new Date(photo.source.capturedAt).toISOString().slice(0,10))} · 현재 현장 사진 아님</p>
                         <p>{photo.identity?.reason??'사진은 확보했으나 이 시야의 공동 대조 관찰을 완료하지 못했습니다.'}</p>
                         {photo.identity&&<><p>읽힌 간판: {photo.identity.visibleName||'판독 불가'}</p><p>{photo.identity.identityReason}</p><p>거리사진에서 확인할 시야: {photo.identity.nextAction}</p></>}
                         <a href={photo.source.url} target="_blank" rel="noopener noreferrer">거리 사진 원본 위치 보기</a>
+                        {naverPanoramaPose(photo.source)&&<button type="button" className="roadview-open-btn" onClick={()=>setActivePanorama(photo.source)}>이 사진 위치 360° 거리뷰</button>}
+                        {photo.source.provider==='naver'&&<p>© NAVER Corp. · 보관된 판독 사진과 별도로 둘러봅니다.</p>}
                         <details><summary>분석에 사용한 사진 정보</summary>
-                            <p>촬영 좌표 {photo.source.coord.join(', ')} · 방향 {photo.source.heading}°{photo.source.panoId?` · 파노라마 ${photo.source.panoId}`:''}</p>
-                            <p>요청 좌표 {photo.input.coord.join(', ')} · 목표 {photo.input.target.join(', ')} · 요청 방향 {photo.input.heading}° · 기울임 {photo.input.tilt}° · 확대 {photo.input.zoom}</p>
+                            <p>촬영 좌표 {photo.source.coord.join(', ')} · 실제 방향 {photo.source.heading}°{photo.source.tilt!==undefined?` · 실제 기울기 ${photo.source.tilt}° (아래 +)`:''}{photo.source.fov!==undefined?` · 실제 FOV ${photo.source.fov}°`:''}{photo.source.panoId?` · 파노라마 ${photo.source.panoId}`:''}</p>
+                            <p>요청 좌표 {photo.input.coord.join(', ')} · 목표 {photo.input.target.join(', ')} · 요청 방향 {photo.input.heading}° · 기울임 {photo.input.tilt}° (아래 +) · 요청 프레이밍 프리셋 {photo.input.zoom} (네이티브 줌 아님)</p>
                         </details>
                     </figcaption>
                 </figure>)}
@@ -141,5 +147,6 @@ export default function PlaceEntrance({place,onLocate}:Props){
                 </div>
             </details>
         </div>}
+        {activePanorama&&<PanoramaModal source={activePanorama} onClose={()=>setActivePanorama(null)}/>}
     </section>;
 }

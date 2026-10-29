@@ -1,9 +1,15 @@
 import { z } from 'zod';
 import { imageInput, MAX_IMAGE_BYTES } from './khu.ts';
-import { bearing, meters, type Coord, type Sample } from './domain.ts';
+import { bearing, meters, evidenceSourceSchema, type Coord, type Sample } from './domain.ts';
+import {naverPanoramaPose} from './roadview-source.ts';
 import type { ServerConfig } from './server-config';
 const coordinate = z.tuple([z.number().min(124).max(132), z.number().min(33).max(40)]);
-const source = z.object({url:z.string().url().refine(value=>{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&['map.kakao.com','kko.to','map.naver.com','naver.me','www.mapillary.com'].includes(u.hostname);}),capturedAt:z.number().min(0).refine(value=>value<=Date.now()).nullable(),capturedMonth:z.string().regex(/^20\d{2}-(0[1-9]|1[0-2])$/).optional(),coord:coordinate,heading:z.number().min(0).max(360),panoId:z.string().optional(),tilt:z.number().min(-45).max(45).optional(),zoom:z.number().int().min(0).max(2).optional()});
+const source = evidenceSourceSchema.omit({distance:true}).extend({
+    url:z.string().url().refine(value=>{const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&['viewer.map.naver.com','map.kakao.com','kko.to','map.naver.com','naver.me','www.mapillary.com','www.google.com','kartaview.org'].includes(url.hostname);}),
+    coord:coordinate,heading:z.number().finite().min(0).max(360),
+    capturedAt:z.number().min(0).refine(value=>value<=Date.now()).nullable(),
+    tilt:z.number().finite().min(-45).max(45).optional(),zoom:z.number().int().min(0).max(2).optional(),
+});
 const rendered = z.object({ image: imageInput, source });
 export type StreetImage = {
     image: z.infer<typeof imageInput>;
@@ -98,7 +104,7 @@ async function googleStreetView(sample:Sample,config:ServerConfig,signal:AbortSi
         const link=new URL('https://www.google.com/maps/@');
         link.search=new URLSearchParams({api:'1',map_action:'pano',viewpoint:`${coord.data[1]},${coord.data[0]}`,pano:metadata.pano_id,heading:String(heading),...(options.tilt!==undefined?{pitch:String(-options.tilt)}:{})}).toString();
         const month=typeof metadata.date==='string'&&/^20\d{2}-(0[1-9]|1[0-2])$/.test(metadata.date)&&metadata.date<=new Date().toISOString().slice(0,7)?metadata.date:undefined;
-        return {image,source:{url:link.href,capturedAt:null,...(month?{capturedMonth:month}:{}),coord:coord.data,heading,panoId:metadata.pano_id,...(options.tilt!==undefined?{tilt:-options.tilt}:{}),...(options.zoom!==undefined?{zoom:options.zoom}:{})}};
+        return {image,source:{url:link.href,capturedAt:null,...(month?{capturedMonth:month}:{}),coord:coord.data,heading,panoId:metadata.pano_id,...(options.tilt!==undefined?{tilt:options.tilt}:{}),...(options.zoom!==undefined?{zoom:options.zoom}:{})}};
     }catch(error){
         signal.throwIfAborted();
         if(error instanceof ImageryServiceError)throw error;
@@ -161,18 +167,21 @@ export async function streetImage(sample: Sample, config: ServerConfig, signal: 
     if(config.imageryProvider==='kartaview')return kartaview(sample,deadline,options);
     if (config.rendererUrl) {
         try {
-            const raw:unknown=await checkedFetch(config.rendererUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + config.rendererToken, 'Content-Type': 'application/json' }, body: JSON.stringify({coord:sample.coord,heading:sample.heading,...viewpoint}) },deadline,async response=>JSON.parse(new TextDecoder().decode(await boundedBytes(response,6*1024*1024))),30000,'renderer');
+            const raw:unknown=await checkedFetch(config.rendererUrl, { method: 'POST', headers: { Authorization: 'Bearer ' + config.rendererToken, 'Content-Type': 'application/json' }, body: JSON.stringify({coord:sample.coord,heading:sample.heading,...viewpoint,maxDistance:maxCameraDistance}) },deadline,async response=>JSON.parse(new TextDecoder().decode(await boundedBytes(response,6*1024*1024))),30000,'renderer');
             if (raw !== null) {
                 const image = rendered.parse(raw);
+                if(!naverPanoramaPose(image.source))throw new ImageryServiceError(503,'Renderer returned invalid NAVER panorama provenance');
                 const expectedHeading = options.target && meters(image.source.coord, options.target) > 0.5 ? bearing(image.source.coord, options.target) : sample.heading;
-                const viewpointMatches=(options.tilt===undefined||image.source.tilt===options.tilt)&&(options.zoom===undefined||image.source.zoom===options.zoom);
+                const viewpointMatches=(options.tilt===undefined||Math.abs((image.source.tilt??NaN)-options.tilt)<=1)&&(options.zoom===undefined||image.source.zoom===options.zoom);
                 if(viewpointMatches&&meters(sample.coord,image.source.coord)<=maxCameraDistance&&Math.abs(((image.source.heading-expectedHeading+540)%360)-180)<=65)return image;
+                throw new ImageryServiceError(503,'Renderer returned an unrelated panorama viewpoint');
             }
         } catch (error) {
             signal.throwIfAborted();
-            if(error instanceof ImageryServiceError && ([401,403,404].includes(error.status) || error.status===429&&!config.mapillary)) throw error;
-            if(!config.mapillary||deadline.aborted)throw new ImageryServiceError(503);
+            if(error instanceof ImageryServiceError)throw error;
+            throw new ImageryServiceError(503);
         }
+        return null;
     }
     if(config.mapillary){
         const alternate=await mapillary(options.target&&meters(sample.coord,options.target)>.5?{...sample,heading:bearing(sample.coord,options.target)}:sample,config,deadline);

@@ -1,12 +1,17 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {analyzePlaceEntrance,decidePlaceEntrance,entranceResponseSchema,entranceViewReviewSchema,type EntranceReview} from '../lib/place-entrance.ts';
+import {analyzePlaceEntrance,decidePlaceEntrance,entranceResponseSchema,entranceViewReviewSchema,type EntranceReview,type EntranceResponse} from '../lib/place-entrance.ts';
 import type {Place} from '../lib/domain.ts';
 import type {ServerConfig} from '../lib/server-config.ts';
 
 const place:Place={id:'cafe-fixture',name:'오늘 카페 수원점',address:'테스트 주소',coord:[127.04,37.26]};
 function view(changes:Partial<EntranceReview['views'][number]>={}){
     return entranceViewReviewSchema.parse({id:'photo-1',visibleName:place.name,matchesTarget:true,nameMatch:'exact',identityReason:'오늘 카페 수원점 간판과 해당 출입문이 이어집니다.',branchMatch:'matched',visibleBranch:'수원점',visibleAddress:'',entranceVisible:true,samePassage:true,connection:'flat',continuousConnection:true,bypass:'none-observed',bypassSamePassage:false,entirePassageVisible:true,reason:'선택한 점포 간판 아래 문과 보도의 연결이 보입니다.',nextAction:'간판 아래 출입문 하단과 보도가 함께 보이도록 왼쪽에서 촬영해 주세요.',...changes});
+}
+type CaptureInput={coord:[number,number];heading:number;target:[number,number];tilt:number;zoom:number;maxDistance:number};
+function naverSource(input:CaptureInput):EntranceResponse['evidence'][number]['source']{
+    const pan=((input.heading+180)%360+360)%360-180,fov=[90,60,40][input.zoom];
+    return {provider:'naver',url:`https://viewer.map.naver.com/panorama?id=fixture&heading=${pan}&tilt=${-input.tilt}&fov=${fov}`,capturedAt:null,panoId:'fixture',coord:input.coord,heading:input.heading,tilt:input.tilt,zoom:input.zoom,fov};
 }
 
 test('a neighboring storefront cannot clear the selected cafe entrance',()=>{
@@ -79,13 +84,13 @@ test('transliterated brand still requires independently visible matching branch 
 
 test('independent entrance analysis retains real capture inputs and rejects the wrong target through four views',async t=>{
     const config:ServerConfig={routing:{kind:'kakao',restKey:'test'},ai:'test',model:'gemini-test',mapillary:'',rendererUrl:'https://renderer.example/capture',rendererToken:'test'};
-    const captures:{coord:[number,number];heading:number;target:[number,number];tilt:number;zoom:number}[]=[];
+    const captures:CaptureInput[]=[];
     let jointReviews=0;
     t.mock.method(globalThis,'fetch',async(input:string|URL|Request,init?:RequestInit)=>{
         const body=JSON.parse(String(init?.body));
         if(String(input)===config.rendererUrl){
             captures.push(body);
-            return Response.json({image:{mime:'image/jpeg',data:btoa(String.fromCharCode(255,216,255,captures.length,0,0))},source:{url:'https://map.kakao.com/?panoid=fixture',capturedAt:1700000000000,panoId:'fixture',coord:body.coord,heading:body.heading,tilt:body.tilt,zoom:body.zoom}});
+            return Response.json({image:{mime:'image/jpeg',data:btoa(String.fromCharCode(255,216,255,captures.length,0,0))},source:{...naverSource(body),capturedAt:1700000000000}});
         }
         jointReviews++;
         assert.equal(body.generationConfig.responseSchema.type,'OBJECT');
@@ -103,6 +108,9 @@ test('independent entrance analysis retains real capture inputs and rejects the 
     for(const photo of result.evidence){
         assert.deepEqual(photo.input.target,place.coord);
         assert.equal(photo.source.capturedAt,1700000000000);
+        assert.equal(photo.source.provider,'naver');
+        assert.equal(photo.source.fov,[90,60,40][photo.input.zoom]);
+        assert.ok(captures.every(capture=>capture.maxDistance===60));
         assert.ok(captures.some(capture=>JSON.stringify(capture.coord)===JSON.stringify(photo.input.coord)&&capture.heading===photo.input.heading&&capture.tilt===photo.input.tilt&&capture.zoom===photo.input.zoom));
     }
 });
@@ -113,7 +121,7 @@ test('an unavailable analysis service retains captured original evidence without
     t.mock.method(globalThis,'fetch',async(input:string|URL|Request,init?:RequestInit)=>{
         if(String(input)!==config.rendererUrl)return new Response('',{status:503});
         const body=JSON.parse(String(init?.body));
-        return Response.json({image,source:{url:'https://map.kakao.com/?panoid=fixture',capturedAt:null,coord:body.coord,heading:body.heading,tilt:body.tilt,zoom:body.zoom}});
+        return Response.json({image,source:naverSource(body)});
     });
     const result=await analyzePlaceEntrance(place,config,new AbortController().signal);
     assert.equal(result.verdict,'unknown');
@@ -134,7 +142,7 @@ test('a malformed later joint review retains earlier occlusion observations and 
         const body=JSON.parse(String(init?.body));
         if(String(input)===config.rendererUrl){
             captures++;
-            return Response.json({image:{mime:'image/jpeg',data:btoa(String.fromCharCode(255,216,255,captures,0,0))},source:{url:'https://map.kakao.com/?panoid=fixture',capturedAt:null,panoId:'fixture',coord:body.coord,heading:body.heading,tilt:body.tilt,zoom:body.zoom}});
+            return Response.json({image:{mime:'image/jpeg',data:btoa(String.fromCharCode(255,216,255,captures,0,0))},source:naverSource(body)});
         }
         reviews++;
         const ids=body.contents[0].parts.filter((part:{text?:string})=>part.text?.startsWith('사진 ID: ')).map((part:{text:string})=>part.text.slice('사진 ID: '.length));
@@ -154,7 +162,7 @@ test('joint review reports the failed field instead of conflating malformed data
     const config:ServerConfig={routing:{kind:'kakao',restKey:'test'},ai:'test',model:'gemini-test',mapillary:'',rendererUrl:'https://renderer.example/capture',rendererToken:'test'};
     t.mock.method(globalThis,'fetch',async(input:string|URL|Request,init?:RequestInit)=>{
         const body=JSON.parse(String(init?.body));
-        if(String(input)===config.rendererUrl)return Response.json({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid=fixture',capturedAt:null,coord:body.coord,heading:body.heading,tilt:body.tilt,zoom:body.zoom}});
+        if(String(input)===config.rendererUrl)return Response.json({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:naverSource(body)});
         const invalid={...view({id:'entrance-1'}),connection:'unknown'};
         return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify({views:[invalid]})}]}}]});
     });
@@ -167,7 +175,7 @@ test('a top-level model array is reported as a root protocol error, not silently
     const config:ServerConfig={routing:{kind:'kakao',restKey:'test'},ai:'test',model:'gemini-test',mapillary:'',rendererUrl:'https://renderer.example/capture',rendererToken:'test'};
     t.mock.method(globalThis,'fetch',async(input:string|URL|Request,init?:RequestInit)=>{
         const body=JSON.parse(String(init?.body));
-        if(String(input)===config.rendererUrl)return Response.json({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid=fixture',capturedAt:null,coord:body.coord,heading:body.heading,tilt:body.tilt,zoom:body.zoom}});
+        if(String(input)===config.rendererUrl)return Response.json({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:naverSource(body)});
         return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify([view({id:'entrance-1'})])}]}}]});
     });
     const result=await analyzePlaceEntrance(place,config,new AbortController().signal);
@@ -182,7 +190,7 @@ test('entrance authentication failure explains the service problem and does not 
  t.mock.method(globalThis,'fetch',async(input:string|URL|Request,init?:RequestInit)=>{
   if(String(input)!==config.rendererUrl){reviews++;return new Response('private provider payload',{status:401});}
   const body=JSON.parse(String(init?.body));
-  return Response.json({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid=fixture',capturedAt:null,coord:body.coord,heading:body.heading,tilt:body.tilt,zoom:body.zoom}});
+  return Response.json({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:naverSource(body)});
  });
  const result=await analyzePlaceEntrance(place,config,new AbortController().signal);
  assert.equal(reviews,1);

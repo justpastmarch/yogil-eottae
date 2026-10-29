@@ -106,6 +106,7 @@ export const evidenceSourceSchema = z.object({
     url: z.string().url(), capturedAt: z.number().nullable(), capturedMonth: z.string().regex(/^20\d{2}-(0[1-9]|1[0-2])$/).optional(),
     coord: z.tuple([z.number(), z.number()]), distance: z.number(), heading: z.number().optional(), panoId:z.string().optional(),
     tilt:z.number().optional(),zoom:z.number().optional(),
+    provider:z.literal('naver').optional(),fov:z.number().min(20).max(100).optional(),
 });
 export type EvidenceSource = z.infer<typeof evidenceSourceSchema>;
 export type Evidence = {

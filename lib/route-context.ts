@@ -40,7 +40,7 @@ export function routeImageContext(input: ContextInput): string {
     const exit = after && meters(sample.coord, after) > 0.5 ? bearing(sample.coord, after) : null;
     const nearby = route.steps.map(step => ({ text: step.text, distanceMeters: rounded(meters(step.coord, sample.coord)) })).filter(step => step.distanceMeters <= 40).sort((a, b) => a.distanceMeters - b.distanceMeters).slice(0, 4);
     return baselineRouteContext(input) + '\n경로 대응 보조 정보: ' + JSON.stringify({
-        camera:{coord:source.coord,headingDegrees:rounded(source.heading),tiltDegrees:source.tilt??null,zoom:source.zoom??null},
+        camera:{coord:source.coord,headingDegrees:rounded(source.heading),tiltDegreesPositiveDown:source.tilt??null,fovDegrees:source.fov??null,requestedFramingPreset:source.zoom??null},
         target:{kind:sample.target??'sidewalk',coord:sample.coord,cameraDistanceMeters:rounded(meters(source.coord,sample.coord)),cameraRelativeBearingDegrees:meters(source.coord,sample.coord)<0.5?null:relativeAngle(bearing(source.coord,sample.coord),source.heading)},
         routeTravel: { entryHeadingDegrees: entry === null ? null : rounded(entry), exitHeadingDegrees: exit === null ? null : rounded(exit), turnDegrees: entry === null || exit === null ? null : relativeAngle(exit, entry) },
         positions, nearbyGuidance: nearby,

@@ -1,21 +1,20 @@
 'use client';
 import {useEffect,useRef,useState} from 'react';
-import {ArrowLeft,ChevronRight,ExternalLink,MapPin,Accessibility,Eye,X} from 'lucide-react';
-import {loadKakaoMaps} from '@/lib/kakao-map-sdk';
-import {kakaoPanoramaId} from '@/lib/roadview-source';
+import {ArrowLeft,ChevronRight,ExternalLink,MapPin,Accessibility,Eye} from 'lucide-react';
+import {naverPanoramaPose,imageryProviderLabel} from '@/lib/roadview-source';
 import {meters,hasOnlyProviderBarriers,describeFinding} from '@/lib/domain';
 import type {CapturePreview} from '@/lib/capture-contract';
 import type {Evidence,Finding,Route,Sample,RouteDecision,RouteIssue,JourneyGoal} from '@/lib/domain';
 import RouteTerrain from './RouteTerrain';
+import PanoramaModal from './PanoramaModal';
 
 type Props={route:Route;goal:JourneyGoal;evidence:Record<string,Evidence>;captures:CapturePreview[];phase:'running'|'ready'|'limited'|'failed'|'canceled';activeId:string;decision:RouteDecision;gradeThreshold?:number;onBack():void;onLocate(id:string,coord:Sample['coord']):void};
-type RoadviewSource=NonNullable<Evidence['source']>&{kakaoId:number};
 const actionLabels={recommended:'영상 기준 추천',conditional:'조건부 후보',detour:'이 경로는 우회가 필요해요',hold:'아직 안내 경로로 추천할 수 없어요'};
 const statusLabels={clear:'이동 통로 관찰',caution:'확인된 주의 요소',blocked:'통행 장애 확인',unknown:'추가 확인 필요'};
 const featureLabels={present:'관찰됨','not-observed':'관찰 범위에서 발견 안 됨',unobservable:'이 특징을 관찰할 수 없음'};
 const sourceLabels={imagery:'거리영상에서 관찰한 내용',provider:'길찾기 API의 이동 안내 · 영상 판독 아님',geometry:'선택 지점과 경로 좌표 비교 · 영상 판독 아님',osm:'OpenStreetMap 지도 정보 · 영상 판독 아님',coverage:'영상 확인 상태',service:'처리 실패'};
 function captureDate(source:NonNullable<Evidence['source']>){return source.capturedMonth??(source.capturedAt===null?'시점 미상':new Date(source.capturedAt).toLocaleDateString('ko-KR'));}
-function sourceName(source:NonNullable<Evidence['source']>){const host=new URL(source.url).hostname;return host==='www.google.com'?'Google Street View':host==='kartaview.org'?'KartaView':host==='www.mapillary.com'?'Mapillary':'거리영상';}
+const sourceName=imageryProviderLabel;
 const graphUnavailableReasons={ 'not-configured':'지도 보행망 서비스가 설정되지 않았어요.',network:'지도 보행망을 불러오는 중 연결에 문제가 생겼어요.',incomplete:'지도 보행망 응답이 불완전해 사용할 수 없어요.','too-large':'요청 범위가 너무 넓어 지도 보행망을 불러오지 못했어요.','no-data':'이 경로 주변에서 사용할 수 있는 지도 보행망을 찾지 못했어요.'};
 function GraphCoverage({coverage,partial=false}:{coverage:Route['graphCoverage'];partial?:boolean}){
  if(!coverage)return null;
@@ -27,37 +26,19 @@ function Feature({label,observation}:{label:string;observation:NonNullable<Findi
 function nearestGuidance(route:Route,coord:Sample['coord']){
  return route.steps.reduce<Route['steps'][number]|undefined>((nearest,step)=>!nearest||meters(step.coord,coord)<meters(nearest.coord,coord)?step:nearest,undefined)?.text;
 }
-function CaptureFrame({capture,processing}:{capture:CapturePreview;processing:boolean}){
+function CaptureFrame({capture,processing,onOpen}:{capture:CapturePreview;processing:boolean;onOpen(source:CapturePreview['source']):void}){
  const [unavailable,setUnavailable]=useState(false);
  const kartaview=new URL(capture.source.url).hostname==='kartaview.org';
  return <figure className="capture-frame">
   {unavailable?<p className="capture-unavailable" role="status">보관된 이미지를 불러올 수 없어요. 보관 기간이 지났거나 연결에 문제가 있을 수 있습니다.</p>:<details className="capture-expand"><summary><span className="capture-thumbnail"><img src={capture.url} alt={`${capture.viewId==='initial'?'최초':'재확인'} 판독용 이미지 ${capture.viewId}`} loading={processing?'eager':'lazy'} onError={()=>setUnavailable(true)}/></span><span className="capture-expand-label">{capture.viewId==='initial'?'최초 이미지':'재확인 이미지'} · {capture.viewId}<span>전체 화면 펼치기</span></span></summary><div className="capture-full"><img src={capture.url} alt={`${capture.viewId} 판독용 이미지 전체 화면`} loading="lazy" onError={()=>setUnavailable(true)}/><a href={capture.url} target="_blank" rel="noreferrer">판독 이미지 열기 <ExternalLink size={12}/></a></div></details>}
-  <figcaption><strong>{sourceName(capture.source)} · {capture.source.capturedMonth??captureDate(capture.source)} 촬영</strong><span>방향 {capture.source.heading===undefined?'미제공':`${Math.round(capture.source.heading)}°`}{capture.source.tilt!==undefined?` · 기울기 ${capture.source.tilt}°`:''}{capture.source.zoom!==undefined?` · 줌 ${capture.source.zoom}`:''}</span><span>대상 지점과 촬영 위치 차이 {Math.round(capture.source.distance)}m</span><a href={capture.source.url} target="_blank" rel="noreferrer">촬영 위치 원본 (별도 보기) <ExternalLink size={11}/></a>{kartaview&&<span>© Grab and KartaView Contributors · <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noreferrer">CC BY-SA 4.0</a></span>}</figcaption>
+  <figcaption><strong>{sourceName(capture.source)} · {capture.source.capturedMonth??captureDate(capture.source)} 촬영</strong><span>방향 {capture.source.heading===undefined?'미제공':`${Math.round(capture.source.heading)}°`}{capture.source.tilt!==undefined?` · 기울기 ${capture.source.tilt}° (아래 +)`:''}{capture.source.fov!==undefined?` · 실제 FOV ${capture.source.fov}°`:''}</span><span>대상 지점과 촬영 위치 차이 {Math.round(capture.source.distance)}m</span>{naverPanoramaPose(capture.source)&&<button type="button" className="roadview-open-btn" onClick={()=>onOpen(capture.source)}><Eye size={13}/> 이 사진 위치 360° 거리뷰</button>}<a href={capture.source.url} target="_blank" rel="noreferrer">촬영 위치 원본 (별도 보기) <ExternalLink size={11}/></a>{capture.source.provider==='naver'&&<span>© NAVER Corp.</span>}{kartaview&&<span>© Grab and KartaView Contributors · <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noreferrer">CC BY-SA 4.0</a></span>}</figcaption>
  </figure>;
 }
-function CaptureGallery({captures,processing}:{captures:CapturePreview[];processing:boolean}){
- return <section className="capture-gallery" aria-label="판독용 실제 이미지"><h4>판독용 실제 이미지 · {captures.length}장</h4><p className="capture-disclaimer">판독에 사용한 촬영 당시 이미지입니다. 판독 중·실패·중단 여부는 별도로 표시하며, 현재 현장 사진은 아닙니다.</p>{captures.map(capture=><CaptureFrame key={capture.id} capture={capture} processing={processing}/>)}</section>;
-}
-function RoadviewModal({source,onClose}:{source:RoadviewSource;onClose():void}){
- const container=useRef<HTMLDivElement>(null),dialog=useRef<HTMLDialogElement>(null);
- const [error,setError]=useState('');
- useEffect(()=>{
-  let disposed=false;const element=container.current,modal=dialog.current,opener=document.activeElement;
-  const timer=setTimeout(()=>{if(!disposed)setError('로드뷰를 불러오지 못했습니다. 원본 링크로 확인할 수 있습니다.');},15000);
-  modal?.showModal();
-  void loadKakaoMaps().then(sdk=>{
-   if(disposed||!element)return;
-   if(!sdk.Roadview)throw new Error('로드뷰 기능을 불러오지 못했습니다.');
-   const view=new sdk.Roadview(element),position=new sdk.LatLng(source.coord[1],source.coord[0]);
-   sdk.event.addListener(view,'init',()=>{if(!disposed){clearTimeout(timer);setError('');view.setViewpoint({pan:source.heading??0,tilt:source.tilt??7,zoom:source.zoom??0});view.relayout();}});
-   view.setPanoId(source.kakaoId,position);
-  }).catch(()=>{clearTimeout(timer);if(!disposed)setError('로드뷰를 열지 못했습니다. 원본 링크로 확인할 수 있습니다.');});
-  return()=>{disposed=true;clearTimeout(timer);modal?.close();element?.replaceChildren();if(opener instanceof HTMLElement&&opener.isConnected)opener.focus({preventScroll:true});};
- },[source]);
- return <dialog ref={dialog} className="roadview-dialog" aria-label="360도 로드뷰 확인" onCancel={onClose} onClick={event=>{if(event.target===event.currentTarget)onClose();}}><div className="roadview-modal-content"><header className="roadview-modal-header"><div><h3>360° 로드뷰 현장 확인</h3><p>드래그로 주변을 둘러보세요. 현재 현장 사진은 아닙니다.</p></div><button onClick={onClose} aria-label="로드뷰 닫기"><X size={20}/></button></header>{error&&<p role="alert" className="notice">{error}</p>}<div ref={container} className="roadview-modal-viewport"/><footer className="roadview-modal-footer"><span>촬영 {captureDate(source)}</span><a href={source.url} target="_blank" rel="noreferrer">카카오맵 원본 <ExternalLink size={12}/></a></footer></div></dialog>;
+function CaptureGallery({captures,processing,onOpen}:{captures:CapturePreview[];processing:boolean;onOpen(source:CapturePreview['source']):void}){
+ return <section className="capture-gallery" aria-label="판독용 실제 이미지"><h4>판독용 실제 이미지 · {captures.length}장</h4><p className="capture-disclaimer">판독에 사용한 촬영 당시 이미지입니다. 판독 중·실패·중단 여부는 별도로 표시하며, 현재 현장 사진은 아닙니다. 360° 보기는 보관된 판독 사진을 바꾸지 않습니다.</p>{captures.map(capture=><CaptureFrame key={capture.id} capture={capture} processing={processing} onOpen={onOpen}/>)}</section>;
 }
 export default function RouteDetails({route,goal,evidence,captures,phase,activeId,decision,gradeThreshold=8,onBack,onLocate}:Props){
- const [showAll,setShowAll]=useState(false),[activeRoadview,setActiveRoadview]=useState<RoadviewSource|null>(null);
+ const [showAll,setShowAll]=useState(false),[activeRoadview,setActiveRoadview]=useState<NonNullable<Evidence['source']>|null>(null);
  const heading=useRef<HTMLHeadingElement>(null),rows=useRef(new Map<string,HTMLElement>()),issueRows=useRef(new Map<string,HTMLElement>());
  const samples=[...route.samples].sort((a,b)=>a.along-b.along);
  const providerRestriction=hasOnlyProviderBarriers(decision);
@@ -99,17 +80,16 @@ export default function RouteDetails({route,goal,evidence,captures,phase,activeI
   const modelFailed=item?.failure==='analysis'||item?.review?.failure==='analysis';
   const processingText=modelFailed?(pointCaptures.length?'영상 확보 · 모델 판독 실패':'모델 판독 실패 · 제출 이미지 미보관'):processing?(pointCaptures.length?'영상 확보 · 판독 중':'영상 확보 대기'):item?.failure==='capture'||item?.review?.failure==='capture'?'영상 확보 실패':item?.failure==='service'||item?.review?.failure==='service'?'처리 서비스 실패':item?.stage==='reserved'?'판독 미완료 · 처리 종료':pointCaptures.length?(finding?'제출 영상 보관 중':'영상 확보 · 판독 결과 없음'):null;
   const source=item?.source??pointCaptures[pointCaptures.length-1]?.source;
-  const kakaoId=source?kakaoPanoramaId(source):null;
   return <li key={id} tabIndex={-1} ref={element=>{if(element)rows.current.set(id,element);else rows.current.delete(id);}} className={'detail-point '+(processing?'is-processing ':'')+(activeId===id?'focused':'')}>
    <div className="detail-point-heading"><span className="detail-point-distance">{Math.round(sample.along)}<small>m 지점</small></span><span className={'detail-status '+(issue?.source==='provider'&&issue.status==='blocked'?'provider':issue?.status??'unknown')}>{processing?'영상 확인 중':issue?.source==='provider'&&issue.status==='blocked'?'길찾기의 계단 안내':issue?statusLabels[issue.status]:'미판독'}</span></div>
    {guidance&&<p className="point-guidance">가장 가까운 지도 안내 · {guidance}</p>}
    <p className="detail-reason">{issue?.reason??item?.reason??'아직 관찰 결과가 없습니다.'}</p>{issue?.action&&<p className="point-next-action">{issue.action}</p>}
    {issue?.source==='provider'&&<p className="provider-evidence-note">길찾기가 반환한 이동 안내입니다. 사진을 보고 계단을 확인했다는 뜻이 아닙니다. 이 지점의 영상 판독은 아래에서 별도로 표시합니다.</p>}
    {processingText&&<p className={'capture-status'+(processing?' processing':'')+(modelFailed?' failed':'')} role={processing?'status':undefined}>{processingText}</p>}
-   {pointCaptures.length?<CaptureGallery captures={pointCaptures} processing={processing}/>:<p className="capture-unavailable">{processing?'아직 모델에 제출할 화면을 확보하지 못했습니다. 확보되면 판독 완료 전에도 여기에 표시됩니다.':issue?.source==='provider'?'지도 정보만 있으며 이 지점에 보관된 제출 이미지는 없습니다.':finding||source?'이전 관찰의 제출 이미지는 보관되어 있지 않습니다. 아래 로드뷰는 당시 제출 화면을 대신하지 않습니다.':'보관된 제출 이미지가 없습니다.'}</p>}
+   {pointCaptures.length?<CaptureGallery captures={pointCaptures} processing={processing} onOpen={setActiveRoadview}/>:<p className="capture-unavailable">{processing?'아직 모델에 제출할 화면을 확보하지 못했습니다. 확보되면 판독 완료 전에도 여기에 표시됩니다.':issue?.source==='provider'?'지도 정보만 있으며 이 지점에 보관된 제출 이미지는 없습니다.':finding||source?'이전 관찰의 제출 이미지는 보관되어 있지 않습니다. 아래 거리뷰는 당시 제출 화면을 대신하지 않습니다.':'보관된 제출 이미지가 없습니다.'}</p>}
    {finding&&<><dl className="detail-features"><Feature label="계단" observation={finding.features?.stairs}/><Feature label="경사로·경사 모습" observation={finding.features?.incline}/></dl>{finding.observation&&<div className="detail-evidence"><h4>목표 연결부 관찰</h4><p>{describeFinding(finding)}</p>{finding.observation.uncertainty!=='none'&&<p>AI 설명 · 사진과 함께 확인: {finding.observation.reason}</p>}</div>}<details className="detail-limitations"><summary>AI 원본 설명 보기 · 검증되지 않음</summary><p>AI가 작성한 설명은 틀릴 수 있습니다. 특히 폭이나 개인의 통과 가능 여부는 이 서비스의 판정 범위가 아닙니다. 보관된 사진과 함께 확인하세요.</p><p>{finding.reason}</p>{finding.observation&&<p>{finding.observation.reason}</p>}{finding.features&&<><p>계단: {finding.features.stairs.reason}</p><p>경사 모습: {finding.features.incline.reason}</p></>}{!!finding.evidence.length&&<ul>{finding.evidence.map((text,index)=><li key={index}>{text}</li>)}</ul>}{!!finding.limitations.length&&<ul>{finding.limitations.map((text,index)=><li key={index}>{text}</li>)}</ul>}</details></>}
-   {item?.review&&<section className="detail-evidence" aria-label="연결부 재확인"><h4>{item.review.reason==='framing'?'시선 회전':'촬영 위치 변경'} 재확인 · {item.review.state==='complete'?'처리 종료':phase!=='running'?'미완료 · 처리 종료':item.review.state==='reserved'?'진행 중':'대기'}</h4><p>{item.review.note}</p>{item.review.sources.map(view=><p key={view.id}><a href={view.source.url} target="_blank" rel="noreferrer">{sourceName(view.source)} · {view.id} · 촬영 {captureDate(view.source)}</a>{item.review?.supportIds.includes(view.id)?' · 목표 판독 근거':''}</p>)}</section>}
-   {source&&<div className="detail-source"><span>{sourceName(source)} 촬영 {captureDate(source)} · 현재 상태 아님</span>{kakaoId!==null&&<button type="button" className="roadview-open-btn" onClick={()=>setActiveRoadview({...source,kakaoId})}><Eye size={13}/> 주변 360° 로드뷰 (별도)</button>}<a href={source.url} target="_blank" rel="noreferrer">촬영 위치 원본 <ExternalLink size={12}/></a></div>}<button className="detail-locate" onClick={()=>onLocate(issue?.id??id,issue?.coord??sample.coord)}><MapPin size={14}/> 지도에서 위치 보기 <ChevronRight size={14}/></button>
+   {item?.review&&<section className="detail-evidence" aria-label="연결부 재확인"><h4>{item.review.reason==='framing'?'시선 회전':'촬영 위치 변경'} 재확인 · {item.review.state==='complete'?'처리 종료':phase!=='running'?'미완료 · 처리 종료':item.review.state==='reserved'?'진행 중':'대기'}</h4><p>{item.review.note}</p>{item.review.sources.map(view=><p key={view.id}><a href={view.source.url} target="_blank" rel="noreferrer">{sourceName(view.source)} · {view.id} · 촬영 {captureDate(view.source)}</a>{naverPanoramaPose(view.source)&&<button type="button" className="roadview-open-btn" onClick={()=>setActiveRoadview(view.source)}>이 재확인 사진 위치 360°</button>}{item.review?.supportIds.includes(view.id)?' · 목표 판독 근거':''}</p>)}</section>}
+   {source&&<div className="detail-source"><span>{sourceName(source)} 촬영 {captureDate(source)} · 현재 상태 아님</span>{naverPanoramaPose(source)&&<button type="button" className="roadview-open-btn" onClick={()=>setActiveRoadview(source)}><Eye size={13}/> 관찰 위치 360° 거리뷰 (별도)</button>}<a href={source.url} target="_blank" rel="noreferrer">촬영 위치 원본 <ExternalLink size={12}/></a></div>}<button className="detail-locate" onClick={()=>onLocate(issue?.id??id,issue?.coord??sample.coord)}><MapPin size={14}/> 지도에서 위치 보기 <ChevronRight size={14}/></button>
   </li>;
  }
  function renderIssue(issue:RouteIssue){
@@ -130,6 +110,6 @@ export default function RouteDetails({route,goal,evidence,captures,phase,activeI
    <ol className="detail-timeline">{visible.map(renderPoint)}</ol>
    <section className="detail-overview"><div className="detail-coverage"><Accessibility size={18}/><strong>영상 판독 결과 {readings.length}<span> / {samples.length} 지점</span></strong></div><progress value={readings.length} max={Math.max(1,samples.length)} aria-label="영상 판독 결과가 있는 지점"/><p className="detail-caption">실제 제출 이미지 {routeCaptures.length}장 · 판독 중인 영상은 결과 수와 별도로 표시합니다. 처리 실패와 미분석은 통행 장애로 세지 않아요. 관찰 지점 사이와 현재 현장 상태까지 보장하지 않아요.</p></section>
    <RouteTerrain route={route} threshold={gradeThreshold} onLocate={coord=>onLocate('',coord)}/>
-  </div>{activeRoadview&&<RoadviewModal source={activeRoadview} onClose={()=>setActiveRoadview(null)}/>}
+  </div>{activeRoadview&&<PanoramaModal source={activeRoadview} onClose={()=>setActiveRoadview(null)}/>}
  </section>;
 }

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import {adjacentSamples,captureAdjacentViews,hasIndependentPanorama,panoramaIdentity,viewIdentity} from '../lib/adjacent-views.ts';
 import {KhuError,validateJointFinding} from '../lib/khu.ts';
 import {bearing,samplesFor,validateFinding,evaluateRoute,type Route,type Finding} from '../lib/domain.ts';
-import {JOURNEY_VERSION,providerStairSamples,reserveJourneyOperation,advanceJourneyState,projectJourneyResult,type JourneyState,type JourneyDependencies} from '../lib/journey.ts';
+import {JOURNEY_VERSION,providerStairSamples,reserveJourneyOperation,advanceJourneyState,projectJourneyResult,journeyStateSchema,type JourneyState,type JourneyDependencies} from '../lib/journey.ts';
 import type {ServerConfig} from '../lib/server-config.ts';
-import {ImageryServiceError} from '../lib/street-imagery.ts';
+import {ImageryServiceError,type StreetImage} from '../lib/street-imagery.ts';
 const config:ServerConfig={routing:{kind:'kakao',restKey:'test'},ai:'test',model:'gemini-test',mapillary:'',rendererToken:'test'};
 const route:Route={id:'r',name:'r',coords:[[127,37],[127.002,37]],distance:177,seconds:200,steps:[],options:[],samples:samplesFor([[127,37],[127.002,37]]),fetchedAt:''};
 const sample=route.samples[1];
@@ -81,7 +81,7 @@ test('framing review that finds occlusion retries from a different panorama',asy
  assert.deepEqual(s.exclusions,[]);
  const second=reserveJourneyOperation(s);assert.ok(second?.kind==='review');
  await advanceJourneyState(s,second,config,new AbortController().signal,{
-  streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+point.along,panoId:String(point.along),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),
+  streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+(Math.round(point.along)+2),panoId:String(Math.round(point.along)+2),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),
   analyzeKhuImage:async()=>{throw Error('unexpected single analysis');},reroute:async()=>{throw Error('unexpected reroute');},
   analyzeKhuViews:async({views})=>({checkedAt:'',review:{finding:clear,views:views.map(view=>({id:view.id,sameCorridor:true,targetPatchVisible:true,observation:'connection visible'})),supportIds:['before'],originalConnectionVisible:true}}),
  });
@@ -139,6 +139,47 @@ test('panorama identity separates physical panoramas from camera orientations',(
  assert.equal(hasIndependentPanorama(source,{...other,coord:source.coord}),false);
  assert.equal(hasIndependentPanorama(source,{...other,url:'https://map.kakao.com/',panoId:undefined}),false);
 });
+test('opaque NAVER IDs are provider scoped and actual FOV distinguishes views, not physical panoramas',()=>{
+ const naver:StreetImage['source']={provider:'naver',url:'https://viewer.map.naver.com/panorama?id=123&heading=0&tilt=-7&fov=90',panoId:'123',capturedAt:null,coord:sample.coord,heading:0,tilt:7,fov:90,zoom:0};
+ const closeup={...naver,fov:40,url:naver.url.replace('fov=90','fov=40')};
+ const other={...naver,panoId:'opaque-next-id',url:naver.url.replace('id=123','id=opaque-next-id'),coord:route.coords[0]};
+ const kakao={...naver,provider:undefined,url:'https://map.kakao.com/?panoid=123',coord:route.coords[0]};
+ assert.equal(panoramaIdentity(naver),'naver:123');
+ assert.equal(panoramaIdentity(naver),panoramaIdentity(closeup));
+ assert.notEqual(viewIdentity(naver),viewIdentity(closeup));
+ assert.equal(viewIdentity(naver),viewIdentity({...naver,zoom:2}));
+ assert.notEqual(panoramaIdentity(naver),panoramaIdentity(kakao));
+ assert.equal(hasIndependentPanorama(naver,closeup),false);
+ assert.equal(hasIndependentPanorama(naver,other),true);
+ assert.equal(hasIndependentPanorama(naver,kakao),false);
+ assert.notEqual(panoramaIdentity({...naver,url:'https://map.naver.com/?panoid=123'}),'kakao:123');
+ assert.notEqual(panoramaIdentity({...naver,provider:undefined}),'naver:123');
+ assert.notEqual(panoramaIdentity({...kakao,url:'https://www.mapillary.com/app/?panoid=123'}),'kakao:123');
+});
+test('NAVER framing review keeps actual camera metadata through joint review and persisted state parsing',async()=>{
+ const s=state('framing'),item=s.evidence['r:'+sample.id];
+ const source={provider:'naver',url:`https://viewer.map.naver.com/panorama?id=opaque-camera&heading=${sample.heading}&tilt=-7&fov=90`,panoId:'opaque-camera',capturedAt:null,capturedMonth:'2026-06',coord:sample.coord,heading:sample.heading,tilt:7,fov:90,zoom:0,distance:0} satisfies NonNullable<typeof item.source>;
+ assert.ok(item.review);
+ item.source=source;item.review.initialSource=source;
+ const op=reserveJourneyOperation(s);assert.ok(op?.kind==='review');
+ await advanceJourneyState(s,op,config,new AbortController().signal,{
+  streetImage:async(point,_config,_signal,options)=>{
+   const pan=((point.heading+180)%360+360)%360-180,tilt=options?.tilt??0,fov=options?.zoom===1?60:90;
+   return {image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{...source,url:`https://viewer.map.naver.com/panorama?id=opaque-camera&heading=${pan}&tilt=${-tilt}&fov=${fov}`,heading:point.heading,tilt,fov,zoom:options?.zoom}};
+  },
+  analyzeKhuImage:async()=>{throw Error('Unexpected initial analysis');},
+  analyzeKhuViews:async({views})=>({checkedAt:'',review:{finding:clear,views:views.map(view=>({id:view.id,sameCorridor:true,targetPatchVisible:true,observation:'Original target directly visible'})),supportIds:['look-down'],originalConnectionVisible:true}}),
+  reroute:async()=>{throw Error('Unexpected reroute');},
+ });
+ const persisted=journeyStateSchema.parse(JSON.parse(JSON.stringify(s))).evidence['r:'+sample.id];
+ assert.deepEqual(persisted.review?.initialSource,source);
+ const downward=persisted.review?.sources.find(view=>view.id==='look-down')?.source;
+ assert.equal(downward?.provider,'naver');
+ assert.equal(downward?.panoId,'opaque-camera');
+ assert.equal(downward?.tilt,25);
+ assert.equal(downward?.fov,60);
+ assert.equal(persisted.finding?.status,'clear');
+});
 test('lost screenshot ownership cancels in-flight review captures and starts no further camera',async()=>{
  let calls=0,peerCanceled=false;
  const failure=new Error('lost ownership');
@@ -165,7 +206,7 @@ test('recovery is a separate bounded operation, preserves originals, and cannot 
  item.status='blocked';item.finding={...clear,status:'blocked',observation:{...clear.observation,connection:'stairs',reason:'같은 통로의 계단이 직접 보임'}};
  const op=reserveJourneyOperation(s);assert.equal(op?.kind,'review');assert.ok(op);
  let analyses=0;
- const deps:JourneyDependencies={streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+point.along,panoId:String(point.along),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),analyzeKhuImage:async()=>{throw Error('initial capture must not rerun');},analyzeKhuViews:async({views})=>{analyses++;return {review:{...joint(),views:views.map(view=>({id:view.id,sameCorridor:true,targetPatchVisible:true,observation:'connection'})),supportIds:[views[0].id]},checkedAt:''};},reroute:async()=>{throw Error('not rerouting in review');}};
+ const deps:JourneyDependencies={streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+(Math.round(point.along)+2),panoId:String(Math.round(point.along)+2),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),analyzeKhuImage:async()=>{throw Error('initial capture must not rerun');},analyzeKhuViews:async({views})=>{analyses++;return {review:{...joint(),views:views.map(view=>({id:view.id,sameCorridor:true,targetPatchVisible:true,observation:'connection'})),supportIds:[views[0].id]},checkedAt:''};},reroute:async()=>{throw Error('not rerouting in review');}};
  await advanceJourneyState(s,op,config,new AbortController().signal,deps);
  assert.equal(analyses,1);assert.equal(item.status,'blocked');assert.equal(item.review?.initialFinding.reason,initial.reason);assert.equal(item.review?.state,'complete');assert.equal(item.review?.sources.length,3);
  assert.notEqual(reserveJourneyOperation(s)?.kind,'review');
@@ -195,7 +236,7 @@ test('recovery uses camera metadata of the supporting view rather than unrelated
  for(const support of ['center','after']){
   const s=state(),item=s.evidence['r:'+sample.id],op=reserveJourneyOperation(s);assert.ok(op);
   await advanceJourneyState(s,op,config,new AbortController().signal,{
-   streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+point.along,panoId:String(point.along),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),
+   streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+(Math.round(point.along)+2),panoId:String(Math.round(point.along)+2),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),
    analyzeKhuImage:async()=>{throw Error('unexpected single analysis');},reroute:async()=>{throw Error('unexpected reroute');},
    analyzeKhuViews:async({views})=>({checkedAt:'',review:{finding:clear,views:views.map(view=>({id:view.id,sameCorridor:view.id===support,targetPatchVisible:view.id===support,observation:'only the supporting view shows the intended connection'})),supportIds:[support],originalConnectionVisible:true}}),
   });
@@ -227,7 +268,7 @@ test('review distinguishes same-panorama framing from occlusion requiring a dist
      assert.ok(Math.abs(((point.heading-sample.heading+540)%360)-180)<=90);
      assert.ok(options?.tilt!==undefined&&options.tilt>0);
     }
-    const panoId=scenario.samePano?'1':String(point.along);
+    const panoId=scenario.samePano?'1':String(Math.round(point.along)+2);
     return {image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+panoId,panoId,capturedAt:Date.now(),coord:scenario.samePosition?sample.coord:point.coord,heading:point.heading,tilt:options?.tilt,zoom:options?.zoom}};
    },
    analyzeKhuImage:async()=>{throw Error('unexpected initial analysis');},
@@ -333,7 +374,7 @@ test('wrong-target and not-applicable mandatory observations recover before beco
    const finding={...clear,observation};
    s.candidates=[candidate];s.evidence={};
    const deps:JourneyDependencies={
-    streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+point.along,panoId:String(point.along),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),
+    streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+(Math.round(point.along)+2),panoId:String(Math.round(point.along)+2),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),
     analyzeKhuImage:async()=>({finding,model:'gemini-test',checkedAt:'initial-check',usage:{input:1,output:1},billing:undefined}),
     analyzeKhuViews:async({views})=>({checkedAt:'review-check',review:{finding,views:views.map(view=>({id:view.id,sameCorridor:true,targetPatchVisible:true,observation:'Continuous neighboring paving is visible, but the mandatory connection is not established.'})),supportIds:['after'],originalConnectionVisible:true}}),
     reroute:async()=>{throw Error('Rerouting must be reserved after review.');},
@@ -386,7 +427,7 @@ test('review processing failures preserve the original observation and report se
   await advanceJourneyState(s,review,config,new AbortController().signal,{
    streetImage:async point=>{
     if(failure==='capture')throw new ImageryServiceError(503);
-    return {image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+point.along,panoId:String(point.along),capturedAt:Date.now(),coord:point.coord,heading:point.heading}};
+    return {image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+(Math.round(point.along)+2),panoId:String(Math.round(point.along)+2),capturedAt:Date.now(),coord:point.coord,heading:point.heading}};
    },
    analyzeKhuImage:async()=>{throw Error('Unexpected initial analysis.');},
    analyzeKhuViews:async()=>{throw failure==='analysis'?new KhuError('Invalid model response.'):failure==='analysis-timeout'?new DOMException('Model response deadline exceeded.','TimeoutError'):new Error('Review processing failed.');},
@@ -412,7 +453,7 @@ test('unsupported past-image warnings trigger recovery without creating physical
   const s=state(),key='r:'+sample.id,finding={...clear,status};
   s.candidates=[{...route,samples:[{...sample,critical:true}]}];s.evidence={};
   const deps:JourneyDependencies={
-   streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+point.along,panoId:String(point.along),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),
+   streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+(Math.round(point.along)+2),panoId:String(Math.round(point.along)+2),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),
    analyzeKhuImage:async()=>({finding,model:'gemini-test',checkedAt:'first',usage:{input:1,output:1}}),
    analyzeKhuViews:async({views})=>({checkedAt:'review',review:{finding:clear,views:views.map(view=>({id:view.id,sameCorridor:true,targetPatchVisible:true,observation:'The original connection is directly visible.'})),supportIds:['after'],originalConnectionVisible:true}}),
    reroute:async()=>{throw Error('No physical exclusion is expected.');},

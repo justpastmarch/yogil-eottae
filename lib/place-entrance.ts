@@ -1,12 +1,13 @@
 import {z} from 'zod';
-import {bearing, meters, placeSchema, type Coord, type Place, type Sample} from './domain.ts';
+import {bearing, meters, placeSchema, evidenceSourceSchema, type Coord, type Place, type Sample} from './domain.ts';
 import {imageInput} from './khu.ts';
 import {streetImage,ImageryServiceError} from './street-imagery.ts';
 import type {ServerConfig} from './server-config.ts';
+import {viewIdentity} from './adjacent-views.ts';
 
 const coordinate = placeSchema.shape.coord;
 const inputSchema = z.object({coord:coordinate,heading:z.number(),target:coordinate,tilt:z.number(),zoom:z.number()});
-const sourceSchema = z.object({url:z.string().url(),capturedAt:z.number().nullable(),capturedMonth:z.string().optional(),coord:coordinate,heading:z.number(),panoId:z.string().optional(),tilt:z.number().optional(),zoom:z.number().optional()});
+const sourceSchema = evidenceSourceSchema.omit({distance:true}).extend({heading:z.number().finite()});
 export const entranceViewReviewSchema = z.object({
     id:z.string(), visibleName:z.string().max(200), matchesTarget:z.boolean(),
     nameMatch:z.enum(['exact','transliteration','different','unreadable']),identityReason:z.string().min(1).max(1000),
@@ -146,7 +147,7 @@ export async function analyzePlaceEntrance(place:Place,config:ServerConfig,signa
             const sample:Sample={id,coord:input.coord,heading:input.heading,along:0,critical:true,target:'entrance'};
             const capture=await streetImage(sample,config,captureDeadline,{target:input.target,tilt:input.tilt,zoom:input.zoom,purpose:'place-entrance'});
             if(!capture)return;
-            if(evidence.some(view=>view.image.data===capture.image.data||view.source.panoId===capture.source.panoId&&meters(view.source.coord,capture.source.coord)<.5&&Math.abs(view.source.heading-capture.source.heading)<1&&view.input.tilt===input.tilt&&view.input.zoom===input.zoom))return;
+            if(evidence.some(view=>view.image.data===capture.image.data||viewIdentity(view.source)===viewIdentity(capture.source)))return;
             evidence.push({id,image:capture.image,source:capture.source,input});
         }));
         const failure=results.find(result=>result.status==='rejected');

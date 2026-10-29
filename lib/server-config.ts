@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { z } from 'zod';
-const names = ['KAKAO_JAVASCRIPT_KEY', 'KAKAO_REST_API_KEY', 'TMAP_API_KEY', 'CHATKHU_API_KEY', 'CHATKHU_MODEL', 'MAPILLARY_TOKEN', 'ROADVIEW_RENDERER_URL', 'ROADVIEW_RENDERER_TOKEN', 'STREET_IMAGERY_PROVIDER', 'ODSAY_API_KEY', 'OSM_OVERPASS_URL', 'GOOGLE_STREET_VIEW_API_KEY'] as const;
+const names = ['NAVER_MAP_CLIENT_ID', 'KAKAO_REST_API_KEY', 'TMAP_API_KEY', 'CHATKHU_API_KEY', 'CHATKHU_MODEL', 'MAPILLARY_TOKEN', 'ROADVIEW_RENDERER_URL', 'ROADVIEW_RENDERER_TOKEN', 'STREET_IMAGERY_PROVIDER', 'ODSAY_API_KEY', 'OSM_OVERPASS_URL', 'GOOGLE_STREET_VIEW_API_KEY'] as const;
 export type ServerEnv = Partial<Record<typeof names[number], string>> & {DB?: D1Database};
 export type RoutingConfig = { kind: 'kakao'; restKey: string } | { kind: 'tmap'; apiKey: string };
 const context = new AsyncLocalStorage<ServerEnv>();
@@ -30,7 +30,7 @@ export function transitApiKey():string|undefined {
     return (context.getStore() ?? process.env).ODSAY_API_KEY?.trim() || undefined;
 }
 export function publicMapConfig() {
-    return {javascriptKey:z.string().trim().regex(/^[a-f0-9]{32}$/i).parse((context.getStore() ?? process.env).KAKAO_JAVASCRIPT_KEY)};
+    return {clientId:z.string().trim().min(1).max(256).regex(/^[a-zA-Z0-9_-]+$/).parse((context.getStore() ?? process.env).NAVER_MAP_CLIENT_ID)};
 }
 
 export function serverDatabase(): D1Database {

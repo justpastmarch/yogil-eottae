@@ -45,3 +45,11 @@ test('route endpoints do not invent an entry or exit outside route geometry', ()
     assert.ok(final.positions.every((point: { relativeAlongMeters: number }) => point.relativeAlongMeters <= 0));
     assert.equal(initial.positions[3].cameraRelativeBearingDegrees, 0);
 });
+test('analysis context distinguishes actual angular FOV and downward-positive tilt from request presets',()=>{
+    const camera=geometry(routeImageContext({route,sample:route.samples[0],source:{...source,heading:194,tilt:7,fov:60,zoom:2}})).camera;
+    assert.equal(camera.headingDegrees,194);
+    assert.equal(camera.tiltDegreesPositiveDown,7);
+    assert.equal(camera.fovDegrees,60);
+    assert.equal(camera.requestedFramingPreset,2);
+    assert.equal(camera.zoom,undefined);
+});

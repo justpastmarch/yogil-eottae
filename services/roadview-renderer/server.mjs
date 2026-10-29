@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { chromium } from 'playwright';
 import {routeRendererRequest} from './request-policy.mjs';
-import { authorized, captureMonth, parseCapture, parseOrigin, parseState, targetHeading } from './contract.mjs';
+import {authorized, assertFramedState, CaptureError, parseCapture, parseOrigin, parseState, sameFrame, texturePanoId, texturesReady, viewerUrl} from './contract.mjs';
 
 const token = process.env.ROADVIEW_RENDERER_TOKEN;
 if (!token || token.length < 24) throw new Error('ROADVIEW_RENDERER_TOKEN must have at least 24 characters');
@@ -62,53 +62,83 @@ async function capture(input, signal) {
     const page = await context.newPage();
     page.setDefaultTimeout(20_000);
     page.setDefaultNavigationTimeout(20_000);
+
+    // Listen before navigation: native panorama requests can start during SDK init.
+    const pending = new Set();
+    const textures = new Map();
+    let lastTextureActivity = Date.now();
+    page.on('request', request => {
+      if (!texturePanoId(request.url())) return;
+      pending.add(request);
+      lastTextureActivity = Date.now();
+    });
+    page.on('requestfailed', request => {
+      if (pending.delete(request)) {
+        if (request.failure()?.errorText !== 'net::ERR_ABORTED') textures.set(request.url(),{panoId:texturePanoId(request.url()),failed:true});
+        lastTextureActivity = Date.now();
+      }
+    });
+    page.on('requestfinished', async request => {
+      if (!pending.has(request)) return;
+      try {
+        const response = await request.response();
+        if (!response?.ok() || !/^image\//i.test(response.headers()['content-type'] ?? '')) {
+          textures.set(request.url(),{panoId:texturePanoId(request.url()),failed:true});
+          return;
+        }
+        const data = (await response.body()).toString('base64');
+        const size = await page.evaluate(async ({data,mime}) => {
+          const image = new Image();
+          image.src = `data:${mime};base64,${data}`;
+          await image.decode();
+          return {width:image.naturalWidth,height:image.naturalHeight};
+        }, {data,mime:response.headers()['content-type'].split(';')[0]});
+        textures.set(request.url(), {panoId:texturePanoId(request.url()),...size});
+      } catch {
+        textures.set(request.url(),{panoId:texturePanoId(request.url()),failed:true});
+      } finally {
+        pending.delete(request);
+        lastTextureActivity = Date.now();
+      }
+    });
+
     stage = 'sdk';
     const sdkUrl = new URL('/internal/roadview', appOrigin);
-    sdkUrl.search = new URLSearchParams({ lng: String(input.coord[0]), lat: String(input.coord[1]), heading: String(input.heading) }).toString();
-    await page.goto(sdkUrl.href, { waitUntil: 'domcontentloaded' });
+    sdkUrl.search = new URLSearchParams({lng:String(input.coord[0]),lat:String(input.coord[1]),heading:String(input.heading),
+      tilt:String(input.tilt),zoom:String(input.zoom),maxDistance:String(input.maxDistance),
+      ...(input.target?{target:JSON.stringify(input.target)}:{})}).toString();
+    const navigation = await page.goto(sdkUrl.href, { waitUntil: 'domcontentloaded' });
+    if (!navigation?.ok()) throw new CaptureError('Capture application unavailable',navigation?.status()===503?503:502);
     await page.waitForFunction(() => {
-      const text = document.querySelector('#capture-state')?.textContent;
+      const text=document.querySelector('#capture-state')?.textContent;
       if (!text) return false;
-      try { return ['ready', 'missing', 'error'].includes(JSON.parse(text).status); } catch { return false; }
+      try {return ['ready','missing','error'].includes(JSON.parse(text).status);} catch {return false;}
     });
-    const state = parseState(JSON.parse(await page.locator('#capture-state').textContent()));
+    const readState = async () => parseState(await page.evaluate(() => window.__readCaptureState?.()));
+    const state = await readState();
     if (!state) return null;
-    const heading = input.target ? targetHeading(state.coord, input.target, state.heading) : state.heading;
-    const tilt=input.tilt??7,zoom=input.zoom??0;
-    const original = new URL('https://map.kakao.com/');
-    original.search = new URLSearchParams({ map_type: 'TYPE_MAP', map_attribute: 'ROADVIEW', panoid: state.panoId,
-      pan: String(heading), tilt: String(tilt), zoom: String(zoom) }).toString();
-    stage = 'viewer';
-    let panoramaImages = 0;
-    page.on('requestfinished', async request => {
-      const response = await request.response().catch(() => null);
-      if (!response) return;
-      if (response.ok() && new URL(response.url()).hostname === 'map.kakaocdn.net' && new URL(response.url()).pathname.startsWith('/map_roadview/') &&
-          /image\//.test(response.headers()['content-type'] ?? '')) panoramaImages++;
-    });
-    await page.goto(original.href, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => /20\d{2}년\s*(?:0?[1-9]|1[0-2])월/.test(document.body.innerText), null, { timeout: 6000 }).catch(() => {});
-    if (new URL(page.url()).hostname !== 'map.kakao.com' ||
-        new URL(page.url()).searchParams.get('panoid') !== state.panoId) throw new Error('Panorama changed');
-    await page.waitForFunction(() => {
-      const large = element => {
-        const box = element.getBoundingClientRect();
-        return box.width > 400 && box.height > 250 && getComputedStyle(element).visibility !== 'hidden';
-      };
-      return [...document.querySelectorAll('canvas')].some(large) ||
-        [...document.images].some(image => image.complete && image.naturalWidth > 128 && large(image));
-    });
-    stage = 'panorama_images';
-    const imageDeadline = Date.now() + 5000;
-    while (panoramaImages < 2 && Date.now() < imageDeadline && !signal.aborted) {
+    assertFramedState(input,state);
+
+    stage = 'panorama_textures';
+    while (!texturesReady(textures.values(),pending.size,state.panoId,lastTextureActivity)) {
+      if (signal.aborted) throw new Error('Capture cancelled');
+      const current = await readState();
+      if (!current || !sameFrame(state,current)) throw new CaptureError('Panorama changed');
       await page.waitForTimeout(100);
     }
-    if (panoramaImages < 2) throw new Error('Panorama images unavailable');
-    stage = 'screenshot';
-    await page.waitForTimeout(500);
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    const month = captureMonth(await page.locator('body').innerText());
+    const before = await readState();
+    if (!before || !sameFrame(state,before)) throw new CaptureError('Panorama changed');
+    assertFramedState(input,before);
+    if (!texturesReady(textures.values(),pending.size,state.panoId,lastTextureActivity)) throw new CaptureError('Panorama textures changed');
+
+    stage = 'screenshot';
     const jpeg = await page.screenshot({ type: 'jpeg', quality: 85, animations: 'disabled', timeout: 5000 });
+    // Re-read native SDK state after capture, rather than trusting an earlier DOM event.
+    const after = await readState();
+    if (!after || !sameFrame(before,after)) throw new CaptureError('Panorama changed during capture');
+    assertFramedState(input,after);
+    if (!texturesReady(textures.values(),pending.size,after.panoId,lastTextureActivity)) throw new CaptureError('Panorama textures changed during capture');
     const painted = await page.evaluate(async data => {
       const image = new Image();
       image.src = `data:image/jpeg;base64,${data}`;
@@ -128,12 +158,13 @@ async function capture(input, signal) {
       }
       return dark / (pixels.length / 64) < 0.95 && colors.size > 12;
     }, jpeg.toString('base64'));
-    if (!painted) throw new Error('Panorama did not paint');
-    return { image: { mime: 'image/jpeg', data: jpeg.toString('base64') },
-      source: { capturedAt: null, ...(month ? { capturedMonth: month } : {}),
-        coord: state.coord, heading,tilt,zoom, panoId:state.panoId, url: original.href } };
+    if (!painted) throw new CaptureError('Panorama did not paint');
+    return {image:{mime:'image/jpeg',data:jpeg.toString('base64')},
+      source:{provider:'naver',capturedAt:null,...(after.capturedMonth?{capturedMonth:after.capturedMonth}:{}),
+        coord:after.coord,heading:after.heading,tilt:after.tilt,fov:after.fov,zoom:input.zoom,panoId:after.panoId,url:viewerUrl(after)}};
   } catch (error) {
-    if (!signal.aborted) console.error(JSON.stringify({event:'roadview_capture_failed',stage,reason:error instanceof Error && error.name==='TimeoutError'?'timeout':'capture_error'}));
+    if (!signal.aborted) console.error(JSON.stringify({event:'roadview_capture_failed',stage,
+      reason:error instanceof CaptureError && error.status===403?'sdk_auth':error instanceof Error && error.name==='TimeoutError'?'timeout':'capture_error'}));
     throw error;
   } finally {
     signal.removeEventListener('abort', close);
@@ -158,8 +189,9 @@ const server = http.createServer(async (req, res) => {
     catch { return respond(res, 400, { error: 'Invalid capture request' }); }
     const result = await capture(input, controller.signal);
     respond(res, 200, result);
-  } catch {
-    respond(res, 502, { error: 'Roadview capture unavailable' });
+  } catch (error) {
+    const status=error instanceof CaptureError?error.status:502;
+    respond(res,status,{error:status===403?'Naver panorama authentication failed':status===503?'Capture application unavailable':'Roadview capture unavailable'});
   } finally {
     clearTimeout(timeout);
     req.off('aborted', abort);

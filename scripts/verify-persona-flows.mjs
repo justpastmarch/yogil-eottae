@@ -33,6 +33,7 @@ try{
  assert.equal(await page.locator('#from').inputValue(),start);assert.equal(await page.locator('#to').inputValue(),end);
  heldJourney=false;releaseJourney.resolve();
  heldAdvance=true;
+ if(!await page.locator('.search-button').isVisible())await page.locator('.results-controls button').click();
  await page.locator('.search-button').click();
  await page.locator('.route-card').first().waitFor({timeout:60000});
  const progress=page.getByRole('button',{name:'중지',exact:true});

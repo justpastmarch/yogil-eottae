@@ -2,7 +2,7 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateRoute, recommendedRoute, samplesFor, inspectionOrder, type Route, type Evidence, type Coord, type Finding } from '../lib/domain.ts';
 import { requestSchema } from '../lib/requests.ts';
-import { serverConfig, runWithServerEnv, type ServerConfig } from '../lib/server-config.ts';
+import {serverConfig,runWithServerEnv,routingConfig,publicMapConfig,type ServerConfig} from '../lib/server-config.ts';
 import { createJourneyState, advanceJourneyState, reserveJourneyOperation, projectJourneyResult, journeyStateSchema, type JourneyState, type JourneyDependencies } from '../lib/journey.ts';
 import {search} from '../lib/providers.ts';
 import snapshot from '../data/yeongtong-campus.osm.json' with {type:'json'};
@@ -64,13 +64,15 @@ test('request scoped secrets stay isolated and missing imagery cannot produce an
     await Promise.all(['one', 'two'].map(key => runWithServerEnv({ ...config, CHATKHU_API_KEY: key }, async () => { await Promise.resolve(); assert.equal(serverConfig().ai, key); })));
 });
 
-test('Kakao routing is selected only at configuration time and public map config excludes private keys', async () => {
-    const {routingConfig,publicMapConfig}=await import('../lib/server-config.ts');
-    runWithServerEnv({KAKAO_REST_API_KEY:'private-rest',KAKAO_JAVASCRIPT_KEY:'a'.repeat(32),CHATKHU_API_KEY:'private-ai',TMAP_API_KEY:'other',GOOGLE_STREET_VIEW_API_KEY:'private-google'},()=>{
+test('public Naver credentials stay independent of routing and private credentials',async()=>{
+    runWithServerEnv({NAVER_MAP_CLIENT_ID:'public-naver',KAKAO_REST_API_KEY:'private-rest',CHATKHU_API_KEY:'private-ai',TMAP_API_KEY:'other',GOOGLE_STREET_VIEW_API_KEY:'private-google'},()=>{
         assert.equal(serverConfig().googleStreetViewKey,'private-google');
         assert.deepEqual(routingConfig(),{kind:'kakao',restKey:'private-rest'});
-        assert.deepEqual(publicMapConfig(),{javascriptKey:'a'.repeat(32)});
+        assert.deepEqual(publicMapConfig(),{clientId:'public-naver'});
     });
+    assert.deepEqual(runWithServerEnv({NAVER_MAP_CLIENT_ID:'naver-only'},publicMapConfig),{clientId:'naver-only'});
+    assert.throws(()=>runWithServerEnv({KAKAO_REST_API_KEY:'private-rest'},publicMapConfig));
+    await Promise.all(['one','two'].map(clientId=>runWithServerEnv({NAVER_MAP_CLIENT_ID:clientId},async()=>{await Promise.resolve();assert.deepEqual(publicMapConfig(),{clientId});})));
     assert.deepEqual(runWithServerEnv({TMAP_API_KEY:'fallback'},routingConfig),{kind:'tmap',apiKey:'fallback'});
 });
 

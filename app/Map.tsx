@@ -1,7 +1,7 @@
 'use client';
 import {useEffect,useRef,useState} from 'react';
 import type {Coord,Place,Route,RouteAssessments} from '@/lib/domain';
-import {loadKakaoMaps,type KakaoMap,type KakaoMaps,type KakaoOverlay} from '@/lib/kakao-map-sdk';
+import {loadNaverMaps,naverMapReloadRequired,subscribeNaverAuthFailure,type NaverMap,type NaverMaps,type NaverOverlay,type NaverMapClick} from '@/lib/naver-map-sdk';
 
 type Props = {
   routes: Route[]; selected: string; activeId:string; assessments: RouteAssessments;
@@ -9,66 +9,97 @@ type Props = {
   onPoint: (point: Coord) => void; onEvidence: (id: string) => void; focus: Coord | null;
   gradeThreshold?: number; onFocus?: (coord:Coord)=>void;
 };
-type MapSession = {sdk: KakaoMaps; map: KakaoMap};
+type MapSession = {sdk:NaverMaps;map:NaverMap};
 
 export default function MapView({routes,selected,activeId,assessments,start,end,onPoint,onEvidence,focus,gradeThreshold=8,onFocus}: Props) {
   const container = useRef<HTMLDivElement>(null);
   const handlers = useRef({onPoint,onEvidence,onFocus});
   handlers.current = {onPoint,onEvidence,onFocus};
   const focusedMarker=useRef<string|null>(null);
-  const fittedGeometry=useRef<{map:KakaoMap;key:string}|null>(null);
+  const fittedGeometry=useRef<{map:NaverMap;key:string}|null>(null);
+  const clearOverlays=useRef<()=>void>(()=>{});
   const [session,setSession] = useState<MapSession | null>(null);
-  const [failed,setFailed] = useState(false);
+  const [error,setError]=useState('');
   const [retry,setRetry] = useState(0);
   const [legendOpen,setLegendOpen]=useState(false);
 
-  useEffect(() => {
-    let disposed = false;
-    let cleanup = () => {};
-    setFailed(false);
+  useEffect(()=>{
+    let disposed=false;
+    let authFailed=false;
+    let cleanup=()=>{};
+    setError('');
     setSession(null);
-    loadKakaoMaps().then(sdk => {
-      const element = container.current;
-      if (disposed || !element) return;
-      const map = new sdk.Map(element,{center: new sdk.LatLng(37.245,127.071),level:5});
-      map.addControl(new sdk.ZoomControl(),sdk.ControlPosition.BOTTOMRIGHT);
-      const onClick = (event: {latLng: {getLng():number; getLat():number}}) => handlers.current.onPoint([event.latLng.getLng(),event.latLng.getLat()]);
-      sdk.event.addListener(map,'click',onClick);
-      const observer = new ResizeObserver(() => { map.relayout(); });
-      observer.observe(element);
-      cleanup = () => {
-        observer.disconnect();
-        sdk.event.removeListener(map,'click',onClick);
-        element.replaceChildren();
+    const unsubscribe=subscribeNaverAuthFailure(failure=>{
+      if(disposed)return;
+      authFailed=true;
+      cleanup();
+      setSession(null);
+      setError(failure.message);
+    });
+    void loadNaverMaps().then(sdk=>{
+      const element=container.current;
+      if(disposed||authFailed||!element)return;
+      const map=new sdk.Map(element,{center:new sdk.LatLng(37.245,127.071),zoom:15,zoomControl:true,zoomControlOptions:{position:sdk.Position.BOTTOM_RIGHT}});
+      let listener:object|undefined;
+      let observer:ResizeObserver|undefined;
+      let destroyed=false;
+      cleanup=()=>{
+        if(destroyed)return;
+        destroyed=true;
+        clearOverlays.current();
+        if(listener)sdk.Event.removeListener(listener);
+        observer?.disconnect();
+        map.destroy();
       };
+      const onClick=(event:NaverMapClick)=>{
+        const target=event.originalEvent?.target;
+        if(target instanceof Element&&target.closest('[data-map-overlay]'))return;
+        handlers.current.onPoint([event.coord.lng(),event.coord.lat()]);
+      };
+      listener=sdk.Event.addListener(map,'click',onClick);
+      observer=new ResizeObserver(()=>map.autoResize());
+      observer.observe(element);
       setSession({sdk,map});
-    }).catch(() => { if (!disposed) setFailed(true); });
-    return () => { disposed = true; cleanup(); };
+    }).catch(failure=>{
+      cleanup();
+      if(!disposed)setError(failure instanceof Error?failure.message:'네이버 지도를 불러오지 못했습니다.');
+    });
+    return()=>{disposed=true;unsubscribe();cleanup();};
   },[retry]);
 
   useEffect(() => {
     if (!session) return;
     const {sdk,map} = session;
-    const overlays: KakaoOverlay[] = [];
+    const overlays:NaverOverlay[]=[];
     const events = new AbortController();
     const point = (coord: Coord) => new sdk.LatLng(coord[1],coord[0]);
-    const overlay = (coord: Coord,content: HTMLElement,zIndex: number,yAnchor: number) => {
-      overlays.push(new sdk.CustomOverlay({map,position:point(coord),content,zIndex,yAnchor}));
+    const overlay=(coord:Coord,content:HTMLElement,zIndex:number,yAnchor:number)=>{
+      const wrapper=document.createElement('div');
+      wrapper.style.width='max-content';
+      content.style.transform=`translate(-50%,-${yAnchor*100}%)`;
+      content.style.whiteSpace='nowrap';
+      const interactive=content instanceof HTMLButtonElement;
+      if(interactive){
+        wrapper.dataset.mapOverlay='true';
+        for(const eventName of ['mousedown','touchstart','click','dblclick'])wrapper.addEventListener(eventName,event=>event.stopPropagation(),{signal:events.signal});
+      }
+      wrapper.appendChild(content);
+      overlays.push(new sdk.Marker({map,position:point(coord),icon:{content:wrapper,anchor:{x:0,y:0}},zIndex,clickable:interactive,draggable:false}));
     };
     for (const route of [...routes].sort((a,b) => Number(a.id === selected) - Number(b.id === selected))) {
       const active = route.id === selected;
-      overlays.push(new sdk.Polyline({map,path:route.coords.map(point),strokeColor:'#8b95a3',strokeWeight:active ? 7 : 5,strokeOpacity:active ? 1 : .6,strokeStyle:route.graphSegment?'shortdash':'solid'}));
+      overlays.push(new sdk.Polyline({map,path:route.coords.map(point),strokeColor:'#8b95a3',strokeWeight:active?7:5,strokeOpacity:active?1:.6,strokeStyle:route.graphSegment?'shortdash':'solid',zIndex:active?2:1,clickable:false}));
       if (!active) continue;
       if(route.grade&&route.grade.status!=='unavailable')for(const segment of route.grade.segments){
         const steep=Math.abs(segment.gradePercent)>=gradeThreshold;
-        overlays.push(new sdk.Polyline({map,path:segment.coords.map(point),strokeColor:steep?'#9f1239':'#0f766e',strokeWeight:9,strokeOpacity:.85,strokeStyle:segment.gradePercent<0?'shortdash':'solid'}));
+        overlays.push(new sdk.Polyline({map,path:segment.coords.map(point),strokeColor:steep?'#9f1239':'#0f766e',strokeWeight:9,strokeOpacity:.85,strokeStyle:segment.gradePercent<0?'shortdash':'solid',zIndex:3,clickable:false}));
       }
       for(const [index,sample] of route.samples.filter(item=>item.target==='crossing-entry').sort((a,b)=>a.along-b.along).entries()){
         const badge=document.createElement('button');
         badge.type='button';badge.textContent=`횡단 ${index+1}`;
         badge.className='crossing-map-label';
         badge.setAttribute('aria-label',`횡단 진입점 ${index+1}, 출발 후 ${Math.round(sample.along)}m, 지도 위치`);
-        badge.addEventListener('click',event=>{event.stopPropagation();sdk.event.preventMap();handlers.current.onFocus?.(sample.coord);},{signal:events.signal});
+        badge.addEventListener('click',event=>{event.stopPropagation();handlers.current.onFocus?.(sample.coord);},{signal:events.signal});
         overlay(sample.coord,badge,5,1.8);
       }
       for(const sample of assessments[route.id]?.decision?.issues??[]){
@@ -85,11 +116,8 @@ export default function MapView({routes,selected,activeId,assessments,start,end,
         dot.setAttribute('aria-pressed',String(activeId===id));
         dot.style.cssText = `display:grid;place-items:center;width:${size}px;height:${size}px;padding:0;border:${status === 'blocked' ? '3px' : '2px'} solid white;border-radius:50%;background:${providerRestriction?'#a16207':colors[status]};box-shadow:${activeId===id?'0 0 0 4px #163f76, 0 2px 6px #0004':'0 2px 6px #0004'};color:white;font-weight:bold;font-size:10px;cursor:pointer;`;
         if (status === 'blocked') dot.textContent = providerRestriction?(sample.source==='osm'?'지':'계'):'!';
-        dot.addEventListener('mousedown',() => sdk.event.preventMap(),{signal:events.signal});
-        dot.addEventListener('touchstart',() => sdk.event.preventMap(),{signal:events.signal,passive:true});
         dot.addEventListener('click',event => {
           event.stopPropagation();
-          sdk.event.preventMap();
           handlers.current.onEvidence(id);
         },{signal:events.signal});
         const priority=status==='blocked'?(providerRestriction?9:10):status==='caution'?8:needsAttention?7:status==='clear'?6:2;
@@ -106,7 +134,18 @@ export default function MapView({routes,selected,activeId,assessments,start,end,
       overlay(place.coord,pin,4,1);
     }
     focusedMarker.current=null;
-    return () => { const active=document.activeElement;focusedMarker.current=active instanceof HTMLElement?active.dataset.evidenceId??null:null;events.abort();for(const item of overlays)item.setMap(null); };
+    let removed=false;
+    const cleanup=()=>{
+      if(removed)return;
+      removed=true;
+      const active=document.activeElement;
+      focusedMarker.current=active instanceof HTMLElement?active.dataset.evidenceId??null:null;
+      events.abort();
+      for(const item of overlays)item.setMap(null);
+      if(clearOverlays.current===cleanup)clearOverlays.current=()=>{};
+    };
+    clearOverlays.current=cleanup;
+    return cleanup;
   },[session,routes,selected,activeId,assessments,start,end,gradeThreshold]);
 
   useEffect(() => {
@@ -118,26 +157,24 @@ export default function MapView({routes,selected,activeId,assessments,start,end,
     if(fittedGeometry.current?.map===map&&fittedGeometry.current.key===key)return;
     fittedGeometry.current={map,key};
     if (points.length > 1) {
-      const bounds = new sdk.LatLngBounds();
-      for (const coord of points) bounds.extend(new sdk.LatLng(coord[1],coord[0]));
-      map.setBounds(bounds,60,60,60,60);
+      map.fitBounds(points.map(coord=>new sdk.LatLng(coord[1],coord[0])),{top:60,right:60,bottom:60,left:60});
     } else {
       const coord = points[0];
-      if (coord) { map.setCenter(new sdk.LatLng(coord[1],coord[0])); map.setLevel(3); }
+      if(coord){map.setCenter(new sdk.LatLng(coord[1],coord[0]));map.setZoom(17,false);}
     }
   },[session,routes,selected,start,end]);
 
   useEffect(() => {
     if (focus && session) {
       session.map.setCenter(new session.sdk.LatLng(focus[1],focus[0]));
-      session.map.setLevel(2);
+      session.map.setZoom(18,false);
     }
   },[session,focus]);
 
   return (
     <>
-      <div className="map" ref={container} aria-label="확대·축소하고 출발지와 도착지를 선택할 수 있는 지도"/>
-      {failed && <div className="tile-error" role="alert">지도를 불러오지 못했습니다. <button type="button" onClick={() => setRetry(value => value + 1)}>다시 시도</button></div>}
+      <div className="map" ref={container} style={{width:'100%',height:'100%'}} aria-label="확대·축소하고 출발지와 도착지를 선택할 수 있는 지도"/>
+      {error&&<div className="tile-error" role="alert">{error} {naverMapReloadRequired()&&<p>페이지를 새로고침하면 경로 선택이 초기화됩니다.</p>}<button type="button" onClick={()=>{if(naverMapReloadRequired())window.location.reload();else setRetry(value=>value+1);}}>{naverMapReloadRequired()?'페이지 새로고침':'다시 시도'}</button></div>}
       <aside className="map-legend-card" aria-label="통행 환경 상태 범례">
         <button type="button" className="legend-toggle" aria-expanded={legendOpen} aria-controls="map-legend-entries" onClick={()=>setLegendOpen(value=>!value)}>통행 상태 범례 {legendOpen?'접기':'보기'}</button>
         <div id="map-legend-entries" className={'legend-entries'+(legendOpen?' is-open':'')}>
