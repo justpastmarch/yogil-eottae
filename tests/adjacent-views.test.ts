@@ -67,8 +67,9 @@ test('a rotated view looking away from the crossing cannot support its verdict',
  assert.match(item.reason,/방향/);
  assert.equal(item.review.state,'complete');
 });
-test('framing review that finds occlusion retries from a different panorama',async()=>{
+for(const outcome of ['clear','unknown'] as const)test(`framing review beyond former counts schedules one occlusion review ending ${outcome}`,async()=>{
  const s=state('framing'),item=s.evidence['r:'+sample.id];
+ s.lookups=60;s.analyses=48;
  const first=reserveJourneyOperation(s);assert.ok(first?.kind==='review');
  const occluded={...initial,status:'unknown' as const,visibility:'occluded' as const,reviewReason:'occlusion' as const};
  await advanceJourneyState(s,first,config,new AbortController().signal,{
@@ -83,11 +84,14 @@ test('framing review that finds occlusion retries from a different panorama',asy
  await advanceJourneyState(s,second,config,new AbortController().signal,{
   streetImage:async point=>({image:{mime:'image/jpeg',data:'/9j/AAAA'},source:{url:'https://map.kakao.com/?panoid='+(Math.round(point.along)+2),panoId:String(Math.round(point.along)+2),capturedAt:Date.now(),coord:point.coord,heading:point.heading}}),
   analyzeKhuImage:async()=>{throw Error('unexpected single analysis');},reroute:async()=>{throw Error('unexpected reroute');},
-  analyzeKhuViews:async({views})=>({checkedAt:'',review:{finding:clear,views:views.map(view=>({id:view.id,sameCorridor:true,targetPatchVisible:true,observation:'connection visible'})),supportIds:['before'],originalConnectionVisible:true}}),
+  analyzeKhuViews:async({views})=>({checkedAt:'',review:{finding:outcome==='clear'?clear:occluded,views:views.map(view=>({id:view.id,sameCorridor:true,targetPatchVisible:outcome==='clear',observation:outcome==='clear'?'connection visible':'target remains occluded'})),supportIds:outcome==='clear'?['before']:[],originalConnectionVisible:outcome==='clear'}}),
  });
  assert.equal(item.review?.state,'complete');
- assert.equal(item.status,'clear');
- assert.equal(item.review?.supportIds[0],'before');
+ assert.equal(item.status,outcome);
+ assert.deepEqual(item.review?.supportIds,outcome==='clear'?['before']:[]);
+ assert.equal(s.lookups,66);assert.equal(s.analyses,50);
+ assert.notEqual(reserveJourneyOperation(s)?.kind,'review');
+ assert.equal(projectJourneyResult(s).recommendedId,null);
 });
 test('ordered adjacent points follow traversal through a self-crossing instead of snapping to another branch',()=>{
  const crossing:Route={...route,coords:[[127,37],[127.001,37],[127.001,37.001],[127,37.001],[127,37],[127.001,37]],samples:[]};
@@ -211,8 +215,8 @@ test('recovery is a separate bounded operation, preserves originals, and cannot 
  assert.equal(analyses,1);assert.equal(item.status,'blocked');assert.equal(item.review?.initialFinding.reason,initial.reason);assert.equal(item.review?.state,'complete');assert.equal(item.review?.sources.length,3);
  assert.notEqual(reserveJourneyOperation(s)?.kind,'review');
 });
-test('at the capture limit a recovery reserves only remaining requests and never loops',()=>{
- const s=state();s.lookups=59;const op=reserveJourneyOperation(s);assert.equal(op?.kind,'review');if(op?.kind==='review')assert.equal(op.captureLimit,1);assert.equal(s.lookups,60);assert.notEqual(reserveJourneyOperation(s)?.kind,'review');
+test('review reserves at most three views beyond former global counts and never duplicates an in-flight review',()=>{
+ const s=state();s.lookups=60;s.analyses=48;const op=reserveJourneyOperation(s);assert.equal(op?.kind,'review');if(op?.kind==='review')assert.equal(op.captureLimit,3);assert.equal(s.lookups,63);assert.equal(s.analyses,49);assert.notEqual(reserveJourneyOperation(s)?.kind,'review');
 });
 
 test('exact provider stair instruction excludes stairs without fabricating visual evidence',()=>{
@@ -397,19 +401,23 @@ test('wrong-target and not-applicable mandatory observations recover before beco
    assert.equal(decision.kind,'hold');
    assert.equal(decision.issues[0].status,'unknown');
    assert.deepEqual(result.assessments.r.blockedPassageIds,[]);
-   assert.equal(reserveJourneyOperation(s)?.kind,'replan');
+   assert.equal(reserveJourneyOperation(s),null);
+   assert.equal(s.replans,0);
+   assert.deepEqual(s.pendingReplans,[]);
   }
  }
 });
-test('completed sampled crossings cannot hide an unresolved grouped crossing during replanning',()=>{
+test('completed sampled crossings cannot hide an unresolved grouped crossing after inspection',()=>{
  const s=state(),key='r:'+sample.id;
  const candidate:Route={...route,samples:[{...sample,critical:true,target:'crossing-entry'}],unresolvedCrossings:[{id:'grouped-crossing',coord:sample.coord,along:sample.along,count:2}]};
  const finding={...clear,observation:{...clear.observation,target:'crossing-entry' as const}};
  s.candidates=[candidate];
  s.evidence[key]={...s.evidence[key],status:'clear',finding,review:undefined};
  const operation=reserveJourneyOperation(s);
- assert.equal(operation?.kind,'replan');
- assert.equal(s.phase,'running');
+ assert.equal(operation,null);
+ assert.equal(s.phase,'limited');
+ assert.equal(s.replans,0);
+ assert.deepEqual(s.pendingReplans,[]);
  assert.equal(s.exclusions.length,1);
  assert.equal(s.exclusions[0].sampleId,'grouped-crossing');
  assert.equal(s.exclusions[0].reason,'unverified');

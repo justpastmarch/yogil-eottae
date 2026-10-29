@@ -10,6 +10,7 @@ export type GraphEdge = {
   wayId: number;
   kind: 'sidewalk' | 'crossing' | 'path' | 'shared-road' | 'steps';
   access: 'unknown' | 'blocked';
+  structure?:'tunnel';
 };
 export type PedestrianGraph = { nodes: Record<string, GraphNode>; edges: GraphEdge[]; snapshotAt: string };
 
@@ -146,7 +147,7 @@ export function buildPedestrianGraph(input: unknown): PedestrianGraph {
         const wheelchair=way.tags[`wheelchair:${directionName}`]??way.tags.wheelchair;
         const blockedNodes=first.tags?.wheelchair==='no'||second.tags?.wheelchair==='no'||['stile','turnstile','kissing_gate'].includes(first.tags?.barrier??'')||['stile','turnstile','kissing_gate'].includes(second.tags?.barrier??'');
         const access=DENIED[foot]||kind==='steps'||wheelchair==='no'||blockedNodes?'blocked':'unknown';
-        edges.push({id:`${way.id}:${i}:${directionName}`,from:directionName==='forward'?from:to,to:directionName==='forward'?to:from,length,wayId:way.id,kind,access});
+        edges.push({id:`${way.id}:${i}:${directionName}`,from:directionName==='forward'?from:to,to:directionName==='forward'?to:from,length,wayId:way.id,kind,access,...(way.tags.tunnel==='yes'?{structure:'tunnel'}:{})});
       }
     }
   }

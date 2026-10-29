@@ -21,7 +21,10 @@ export function pointAt(coords: Coord[], along: number): Coord | undefined {
 
 export function baselineRouteContext({ route, sample, source }: ContextInput): string {
     const step = route.steps.reduce<typeof route.steps[number] | undefined>((nearest, candidate) => !nearest || meters(candidate.coord, sample.coord) < meters(nearest.coord, sample.coord) ? candidate : nearest, undefined);
-    return `요청한 관찰 대상: ${sample.target??'sidewalk'}. arrival은 지도 도착점 노면이며 건물 출입구가 아니다. 횡단 진입부와 반대편 탈출부를 구별하고, entrance는 실제 건물 진입 연결부를 확인한다. 진행 방향 ${Math.round(sample.heading)}도. 촬영 방향 ${Math.round(source.heading)}도. 촬영 위치 차이 ${Math.round(meters(sample.coord, source.coord))}m. 경로 좌표 ${JSON.stringify(sample.coord)}. 주변 안내: ${step?.text ?? '보행 이동'}. 지정한 진행 방향의 동일 보행 통로임이 사진에서 명확할 때만 same-path로 판정하라. 옆 건물 입구 계단과 현재 이동 통로를 혼동하지 마라.`;
+    const acquisition=sample.acquisition;
+    const hint=acquisition?route.unverifiedConnections?.find(connection=>connection.id===acquisition.connectionId):undefined;
+    const entry=acquisition?'\n별도 입구 관찰 대상: '+JSON.stringify({sampleId:sample.id,acquisition,coord:sample.coord,providerHint:hint})+' 지하보도 입구 노면과 첫 연결부만 관찰한다. 지도 노드는 촬영 목표 후보이며 계단이나 통과 가능의 증거가 아니다. 이 입구 관찰로 원래 지도 안내 지점이나 지하보도 전체·반대편 출구를 확인했다고 하지 않는다.':'';
+    return `요청한 관찰 대상: ${sample.target??'sidewalk'}. arrival은 지도 도착점 노면이며 건물 출입구가 아니다. 횡단 진입부와 반대편 탈출부를 구별하고, entrance는 실제 건물 진입 연결부를 확인한다. 진행 방향 ${Math.round(sample.heading)}도. 촬영 방향 ${Math.round(source.heading)}도. 촬영 위치 차이 ${Math.round(meters(sample.coord, source.coord))}m. 경로 좌표 ${JSON.stringify(sample.coord)}. 주변 안내: ${step?.text ?? '보행 이동'}. 지정한 진행 방향의 동일 보행 통로임이 사진에서 명확할 때만 same-path로 판정하라. 옆 건물 입구 계단과 현재 이동 통로를 혼동하지 마라.`+entry;
 }
 
 export function routeImageContext(input: ContextInput): string {

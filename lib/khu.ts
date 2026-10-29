@@ -63,7 +63,7 @@ export function khuFailureReason(error:unknown,stage:'initial'|'review'):string 
 async function request(path: string, apiKey: string, body?: unknown, signal?: AbortSignal) {
     const response = await fetch(GATEWAY + path, {
         method: body === undefined ? 'GET' : 'POST', redirect: 'manual', cache: 'no-store', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45000)]) : AbortSignal.timeout(45000),
-        headers: { 'User-Agent': 'GilEum/0.1 (accessibility route analysis)', Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        headers: { 'User-Agent': 'YogilEottae/0.1 (accessibility route analysis)', Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok) {
@@ -87,7 +87,7 @@ const instruction = `실제 거리영상을 근거로 지정한 보행 통로의
 사진으로 cm 단차, 폭, 경사 각도나 %, 법규 준수를 측정하거나 추정하지 않는다. 수치 미측정을 이유로 다른 관찰까지 포기하지 않는다.
 폭이나 볼라드 간격이 휠체어에 충분하거나 부족하다, 휠체어가 지나갈 수 있다 또는 없다, 개인이 자력으로 통과할 수 있다는 판단은 모든 설명과 판정에서 하지 않는다. 촬영 당시의 주정차 차량·오토바이나 볼라드를 현재의 통행 장애로 판정하지 않는다.
 주어진 목표 종류와 이동 순서, 교차로 모양, 안내 지점을 사진과 대조한다. 횡단보도 표시나 점자블록이 있다는 사실만으로 같은 통로라 하지 않는다. 다른 보도, 다른 층, 옆 건물 입구를 혼합하지 않는다.
-observation.target은 ${observationSchema.shape.target.options.join(', ')} 중 실제 관찰한 대상이다. arrival은 지도 도착점의 노면이며 건물 입구가 아니다. entrance를 요청하면 주차장 앞 도로나 건물 외관만으로 entrance를 확인했다고 하지 않는다.
+observation.target은 ${observationSchema.shape.target.options.join(', ')} 중 실제 관찰한 대상이다. arrival은 지도 도착점의 노면이며 건물 입구가 아니다. underpass-entry는 지정한 지하보도 입구의 첫 노면 연결부만 뜻하며 지상 보도나 지하보도 전체를 대신하지 않는다. entrance를 요청하면 주차장 앞 도로나 건물 외관만으로 entrance를 확인했다고 하지 않는다.
 observation.connection은 flush(연결 노면이 이어짐), ramp(연결 경사로), raised(진행을 가로막는 낮춰지지 않은 턱), stairs(통로 계단), unobservable(필요한 연결부 미확인), not-applicable(별도 연결부 없는 보도나 지도 도착점) 중 하나다.
 observation.surface는 continuous(이어지는 포장), uneven(파손·요철), unpaved(비포장), unobservable이다.
 observation.uncertainty는 none, framing(화면 밖이어서 회전·하향·확대 필요), occlusion(차량·수목 등에 가림), corridor(목표 통로 대응 불확실)이다. reason은 무엇을 어디서 보았고 무엇을 더 보아야 하는지 한국어로 설명한다.

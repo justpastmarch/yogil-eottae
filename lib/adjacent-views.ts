@@ -1,3 +1,4 @@
+import {underpassApproachSamples,underpassCameraMatches} from './underpass-acquisition.ts';
 import {bearing,meters,type EvidenceSource,type Route,type Sample} from './domain.ts';
 import {pointAt,routeImageContext} from './route-context.ts';
 import {streetImage,ImageryServiceError,type StreetImage} from './street-imagery.ts';
@@ -42,7 +43,7 @@ export async function captureAdjacentViews({route,sample,limit,config,signal,rea
     const targetHeading=initialSource&&meters(initialSource.coord,sample.coord)>0.5?bearing(initialSource.coord,sample.coord):initialSource?.heading??sample.heading;
     const opposed=Math.abs(((sample.heading-targetHeading+540)%360)-180)>100;
     const framingSample=initialSource?{...sample,coord:initialSource.coord}:sample;
-    const positions=reason==='framing'?(opposed?[{id:'look-forward',sample:{...framingSample,heading:sample.heading}},{id:'look-left',sample:{...framingSample,heading:(targetHeading+300)%360}},{id:'look-down',sample:{...framingSample,heading:targetHeading}}]:[-60,60,0].map((offset,index)=>({id:['look-left','look-right','look-down'][index],sample:{...framingSample,heading:(targetHeading+offset+360)%360}}))):adjacentSamples(route,sample);
+    const positions=sample.acquisition?underpassApproachSamples(route,sample,[24,36,48]):reason==='framing'?(opposed?[{id:'look-forward',sample:{...framingSample,heading:sample.heading}},{id:'look-left',sample:{...framingSample,heading:(targetHeading+300)%360}},{id:'look-down',sample:{...framingSample,heading:targetHeading}}]:[-60,60,0].map((offset,index)=>({id:['look-left','look-right','look-down'][index],sample:{...framingSample,heading:(targetHeading+offset+360)%360}}))):adjacentSamples(route,sample);
     const requests=positions.slice(0,Math.min(3,limit));
     const views:{id:string;image:StreetImage}[]=[];
     let next=0,attempts=0;
@@ -54,9 +55,9 @@ export async function captureAdjacentViews({route,sample,limit,config,signal,rea
         while(next<requests.length&&!deadline.aborted){
             const item=requests[next++];attempts++;
             try {
-                const options=reason==='framing'?{tilt:25,zoom:item.id==='look-down'?1:0}:{target:sample.coord,tilt:15,zoom:0};
+                const options=reason==='framing'&&!sample.acquisition?{tilt:25,zoom:item.id==='look-down'?1:0}:{target:sample.coord,tilt:15,zoom:0};
                 const image=await capture(item.sample,config,deadline,options);
-                if(image){
+                if(image&&underpassCameraMatches(route,sample,image.source.coord)){
                     try{await onView?.({id:item.id,image});}catch(error){persistenceFailure??={error};persistenceController.abort();return;}
                     views.push({id:item.id,image});
                 }

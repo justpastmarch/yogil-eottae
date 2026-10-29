@@ -1,7 +1,8 @@
+import {mappedUnderpassEntry,underpassApproachSamples,underpassCameraMatches} from './underpass-acquisition.ts';
 import {captureAdjacentViews,evidenceSource,hasIndependentPanorama,pointsAwayFromTarget} from './adjacent-views.ts';
 import {pointAt,routeImageContext} from './route-context.ts';
 import {z} from 'zod';
-import {projectOnRoute,meters,validateFinding,evaluateRoute,recommendedRoute,inspectionOrder,journeyGoal,type RouteExploration,type JourneyGoal,type Evidence,type JourneyResult,type Place,type Coord,type Route} from './domain.ts';
+import {projectOnRoute,validateFinding,evaluateRoute,assessRouteAdmission,recommendedRoute,inspectionOrder,journeyGoal,type RouteExploration,type JourneyGoal,type Evidence,type JourneyResult,type Place,type Coord,type Route} from './domain.ts';
 import {routes,reroute} from './providers.ts';
 import {blockedPassageFor,routeTouchesPassage,routeIsDistinct,detourViaPlans,validateCandidate} from './detours.ts';
 import {analyzeKhuImage,analyzeKhuViews,validateJointFinding,KhuError,khuFailureReason} from './khu.ts';
@@ -16,7 +17,7 @@ import type {CaptureObserver} from './capture-contract.ts';
 import {graphBarriersForRoute} from './graph-barriers.ts';
 
 export const journeyPhase=z.enum(['running','ready','limited','failed','canceled']);
-export const JOURNEY_VERSION=8;
+export const JOURNEY_VERSION=9;
 const coord=z.tuple([z.number(),z.number()]);
 const place=z.object({id:z.string(),name:z.string(),address:z.string(),coord});
 export const journeyStateSchema=z.object({
@@ -41,7 +42,7 @@ export function providerStairSamples(route:Route,profile:string):Route['samples'
         return projection&&projection.distance<=20?[{id:'provider-stairs-'+index,coord:projection.coord,along:projection.along,heading:projection.heading,critical:true}]:[];
     });
 }
-function prepareRoute(route:Route,profile:string,goal:JourneyGoal,start:Place,end:Place,graphResult:GraphLoadResult,selectedMatches:CrossingMatch[]|null=null):Route{
+function prepareRoute(route:Route,profile:string,goal:JourneyGoal,graphResult:GraphLoadResult,selectedMatches:CrossingMatch[]|null=null):Route{
     const graph=graphResult.kind==='available'?graphResult.graph:undefined;
     route.graphCoverage=graph?{status:'available',snapshotAt:graph.snapshotAt}:{status:'unavailable',reason:graphResult.kind==='unavailable'?graphResult.reason:'no-data'};
     const samples:Route['samples']=route.samples.map(sample=>({...sample,target:'sidewalk'}));
@@ -66,17 +67,9 @@ function prepareRoute(route:Route,profile:string,goal:JourneyGoal,start:Place,en
         if(!projection)continue;
         const reason=kind==='underpass'?'길찾기에 지하보도 이용 안내가 있습니다. 지상 보도 영상만으로 지하 연결과 계단·승강기 이용을 확인할 수 없습니다.':kind==='elevator'?'길찾기에 엘리베이터 이용 안내가 있습니다. 출입구 연결과 현재 운행 상태는 확인되지 않았습니다.':'길찾기에 역사 내 이동 안내가 있습니다. 승강장부터 출구까지의 휠체어 동선은 확인되지 않았습니다.';
         route.unverifiedConnections.push({id:'connection-step-'+index,kind,coord:step.coord,along:projection.along,reason});
-    }
-    const origin=route.coords[0];
-    if(origin){
-        const gap=meters(origin,start.coord);
-        if(gap>1)route.unverifiedConnections.push({id:'connection-origin',kind:'origin',coord:origin,along:0,reason:`선택한 출발지와 지도 경로 시작점 사이 직선거리는 약 ${Math.round(gap)}m입니다. 이 사이는 이동 경로로 확인되지 않았습니다.`});
-    }
-    const endpoint=route.coords.at(-1);
-    if(endpoint){
-        const gap=meters(endpoint,end.coord);
-        const projection=projectOnRoute(route.coords,endpoint);
-        if(gap>1&&projection)route.unverifiedConnections.push({id:'connection-destination',kind:'destination',coord:endpoint,along:projection.along,reason:`지도 경로 끝과 선택한 장소 좌표 사이 직선거리는 약 ${Math.round(gap)}m입니다. 이 사이는 이동 경로로 확인되지 않았으며 건물 출입구 위치와도 다를 수 있습니다.`});
+        const connection=route.unverifiedConnections.at(-1);
+        const entry=graph&&connection?mappedUnderpassEntry(route,connection,graph):null;
+        if(entry)route.samples.push(entry);
     }
     for(let index=0;index<route.steps.length;index++){
         const step=route.steps[index];if(!/횡단/.test(step.text))continue;
@@ -148,7 +141,7 @@ export async function createJourneyState(input:JourneyInput,config:ServerConfig,
     const providerRoutes=(await routes(input.start,input.end,config.routing,signal)).routes;
     const graphs=await Promise.all(providerRoutes.map(route=>loadGraph(route,signal,config.osmEndpoint)));
     signal.throwIfAborted();
-    const candidates=providerRoutes.map((route,index)=>prepareRoute(route,input.profile,input.goal,input.start,input.end,graphs[index]));
+    const candidates=providerRoutes.map((route,index)=>prepareRoute(route,input.profile,input.goal,graphs[index]));
     const graph=graphs.find(result=>result.kind==='available');
     if(graph?.kind==='available'&&config.routing.kind==='kakao'){
         const proposals=discoverCrossingAlternatives(input.start,input.end,candidates,graph.graph);
@@ -160,9 +153,16 @@ export async function createJourneyState(input:JourneyInput,config:ServerConfig,
                 const matched=selectedCrossingMatches(candidate,proposal,graph.graph);
                 if(!matched)continue;
                 const result=await loadGraph(candidate,signal,config.osmEndpoint);
-                const alternative=prepareRoute(candidate,input.profile,input.goal,input.start,input.end,result,matched);
+                const alternative=prepareRoute(candidate,input.profile,input.goal,result,matched);
                 if(alternative.barriers?.length)continue;
-                const label='다른 횡단보도 '+(candidates.length-providerRoutes.length+1);
+                const namedCrossings=candidate.steps.flatMap(step=>{
+                    const name=step.text.match(/^(.+?)에서\s*(?:\d+\s*개(?:의)?\s*)?횡단보도/)?.[1].trim();
+                    const projection=name?projectOnRoute(candidate.coords,step.coord):null;
+                    if(!name||!projection||projection.distance>20)return [];
+                    const distance=Math.min(...matched.flatMap(match=>match.targets.filter(target=>target.target==='crossing-entry').map(target=>Math.abs(target.along-projection.along))));
+                    return distance<=8?[{name,distance}]:[];
+                }).sort((a,b)=>a.distance-b.distance);
+                const label=namedCrossings.length?namedCrossings[0].name+' 경유':'다른 횡단보도 '+(candidates.length-providerRoutes.length+1);
                 alternative.name=label;
                 alternative.crossingChoice={id:proposal.id,label,wayIds:proposal.crossingWayIds};
                 candidates.push(alternative);
@@ -186,7 +186,7 @@ export function projectJourneyResult(state:JourneyState):JourneyResult{
     const exploration:RouteExploration={
         state:state.phase==='running'?'searching':interrupted?'interrupted':'finished',
         attempts:state.replans,alternatives,
-        reason:state.phase==='running'?`우회 경로 조회 ${state.replans}회, 채택한 우회 후보 ${alternatives}개입니다. 필요한 영상 확인을 진행하고 있습니다.`:state.phase==='canceled'?'탐색이 중지되었습니다. 더 이상 경로나 영상을 조회하지 않습니다.':interrupted?(state.notice??'처리 실패로 탐색을 중단했습니다. 확보한 근거만 표시합니다.'):state.phase==='ready'?'영상 관찰 조건을 충족한 후보를 확보해 탐색을 마쳤습니다.':`우회 경로를 ${state.replans}회 조회했고 ${alternatives}개 후보를 채택했지만, 안내 조건을 충족한 대안은 확보하지 못해 탐색을 마쳤습니다.`,
+        reason:state.phase==='running'?'필요한 지점의 거리영상을 확인하고 있습니다.':state.phase==='canceled'?'거리영상 확인을 중지했습니다. 확보한 사진과 관찰 결과는 볼 수 있습니다.':interrupted?'거리영상 확인을 마치지 못했습니다. 확보한 사진과 관찰 결과를 확인하세요.':state.phase==='ready'?'필요한 지점의 거리영상 확인을 마쳤습니다.':'확인하지 못한 지점은 통행 가능 여부를 판단하지 않았습니다.',
     };
     const assessments=Object.fromEntries(state.candidates.map(route=>{
         const overlaps=state.exclusions.filter(p=>p.reason!=='unverified'&&routeTouchesPassage(route,p));
@@ -205,16 +205,20 @@ export function projectJourneyResult(state:JourneyState):JourneyResult{
             return [{sampleId:'shared-'+passage.id,coord:projection.coord,along:projection.along,reason:'공유하는 통로 · '+(passage.detail??'다른 후보에서 확인한 차단 요소가 있습니다.'),source:originalBarrier?(originalBarrier.source??'provider'):'imagery'} satisfies NonNullable<Route['barriers']>[number]];
         });
         const assessed=inherited.length?{...route,barriers:[...(route.barriers??[]),...inherited]}:route;
-        return [route.id,{blockedPassageIds,decision:evaluateRoute(assessed,state.evidence,blockedPassageIds,state.maxSlope,exploration)}];
+        const decision=evaluateRoute(assessed,state.evidence,blockedPassageIds,state.maxSlope,exploration);
+        return [route.id,{blockedPassageIds,decision,admission:assessRouteAdmission({route:assessed,decision,blockedPassageIds,maxSlope:state.maxSlope})}];
     }));
     const recommendedId=recommendedRoute(state.candidates,state.evidence,assessments,state.maxSlope);
     return {goal:state.goal,routes:state.candidates,evidence:state.evidence,assessments,recommendedId,status:recommendedId?'ready':'limited',maxSlope:state.maxSlope};
 }
 function addExclusion(state:JourneyState,route:Route,sample:Route['samples'][number],reason:'obstacle'|'unverified',detail:string){
     const passage={...blockedPassageFor(route,sample),reason,detail};
-    if(state.exclusions.some(existing=>existing.id===passage.id))return;
-    state.exclusions.push(passage);
-    if(state.provider==='kakao'){
+    const existing=state.exclusions.find(item=>item.id===passage.id);
+    if(existing){
+        if(reason!=='obstacle'||existing.reason!=='unverified')return;
+        Object.assign(existing,passage);
+    }else state.exclusions.push(passage);
+    if(reason==='obstacle'&&state.provider==='kakao'){
         const seen=new Set(state.pendingReplans.map(via=>JSON.stringify(via)));
         for(const via of detourViaPlans(route,passage))if(!seen.has(JSON.stringify(via)))state.pendingReplans.push(via);
     }
@@ -223,25 +227,23 @@ export function reserveJourneyOperation(state:JourneyState):JourneyOperation|nul
     if(state.phase!=='running')return null;
     if(projectJourneyResult(state).recommendedId){state.phase='ready';return null;}
     const pending=inspectionOrder(state.candidates).find(({route,sample})=>state.evidence[route.id+':'+sample.id]?.review?.state==='pending');
-    if(pending&&state.lookups<60&&state.analyses<48){
-        const captureLimit=Math.min(3,60-state.lookups),item=state.evidence[pending.route.id+':'+pending.sample.id];
+    if(pending){
+        const captureLimit=3,item=state.evidence[pending.route.id+':'+pending.sample.id];
         if(item.review)item.review.state='reserved';
         state.lookups+=captureLimit;state.analyses++;
         return {kind:'review',...pending,captureLimit};
     }
-    if(state.lookups<60&&state.analyses<48){
-        for(const route of state.candidates){
-            const barrier=route.barriers?.find(point=>!state.evidence[route.id+':'+point.sampleId]);
-            if(!barrier)continue;
-            const sample=route.samples.find(point=>point.id===barrier.sampleId)??{id:barrier.sampleId,coord:barrier.coord,along:barrier.along,heading:projectOnRoute(route.coords,barrier.coord)?.heading??0,critical:true};
-            state.lookups++;state.analyses++;
-            state.evidence[route.id+':'+sample.id]={sampleId:sample.id,stage:'reserved',status:'unknown',reason:'지도에서 안내한 계단 지점의 실제 영상을 확보하고 있습니다.',checkedAt:new Date().toISOString()};
-            return {kind:'capture',route,sample};
-        }
+    for(const route of state.candidates){
+        const barrier=route.barriers?.find(point=>!state.evidence[route.id+':'+point.sampleId]);
+        if(!barrier)continue;
+        const sample=route.samples.find(point=>point.id===barrier.sampleId)??{id:barrier.sampleId,coord:barrier.coord,along:barrier.along,heading:projectOnRoute(route.coords,barrier.coord)?.heading??0,critical:true};
+        state.lookups++;state.analyses++;
+        state.evidence[route.id+':'+sample.id]={sampleId:sample.id,stage:'reserved',status:'unknown',reason:'지도에서 안내한 계단 지점의 실제 영상을 확보하고 있습니다.',checkedAt:new Date().toISOString()};
+        return {kind:'capture',route,sample};
     }
     for(const route of state.candidates){
         for(const connection of route.unverifiedConnections??[]){
-            if(connection.kind==='origin'||connection.kind==='destination'||(connection.kind==='station'&&(connection.along<35||connection.along>route.distance-35)))continue;
+            if(connection.kind==='station'&&(connection.along<35||connection.along>route.distance-35))continue;
             addExclusion(state,route,{id:connection.id,coord:connection.coord,along:connection.along,heading:projectOnRoute(route.coords,connection.coord)?.heading??0,critical:true},'unverified',connection.reason);
         }
         const critical=route.samples.filter(sample=>sample.critical);
@@ -251,25 +253,23 @@ export function reserveJourneyOperation(state:JourneyState):JourneyOperation|nul
     if(state.pendingReplans.length&&state.replans<4&&state.candidates.filter(route=>!route.graphSegment).length<6){
         const via=state.pendingReplans.shift();if(via){state.replans++;return {kind:'replan',via};}
     }
-    if(state.lookups<60&&state.analyses<48){
-        const candidates=state.candidates.filter(route=>!state.exclusions.some(p=>p.reason!=='unverified'&&routeTouchesPassage(route,p))).map(route=>{
-            const issues=evaluateRoute(route,state.evidence).issues;
-            return {route,attempted:route.samples.filter(sample=>state.evidence[route.id+':'+sample.id]).length,canComplete:!route.samples.some(sample=>{
-                const item=state.evidence[route.id+':'+sample.id];
-                return item&&item.stage!=='reserved'&&issues.find(issue=>issue.sampleId===sample.id)?.status!=='clear';
-            })};
-        }).sort((a,b)=>Number(b.canComplete)-Number(a.canComplete)||(a.canComplete?0:a.attempted-b.attempted));
-        for(const {route} of candidates){
-            const sample=inspectionOrder([route]).map(item=>item.sample).find(sample=>!state.evidence[route.id+':'+sample.id]);
-            if(!sample)continue;
-            state.lookups++;state.analyses++;
-            state.evidence[route.id+':'+sample.id]={sampleId:sample.id,stage:'reserved',status:'unknown',reason:'이 구간을 분석하고 있습니다.',checkedAt:new Date().toISOString()};
-            return {kind:'capture',route,sample};
-        }
+    const candidates=state.candidates.filter(route=>!state.exclusions.some(p=>p.reason!=='unverified'&&routeTouchesPassage(route,p))).map(route=>{
+        const issues=evaluateRoute(route,state.evidence).issues;
+        return {route,attempted:route.samples.filter(sample=>state.evidence[route.id+':'+sample.id]).length,canComplete:!route.samples.some(sample=>{
+            const item=state.evidence[route.id+':'+sample.id];
+            return item&&item.stage!=='reserved'&&issues.find(issue=>issue.sampleId===sample.id)?.status!=='clear';
+        })};
+    }).sort((a,b)=>Number(b.canComplete)-Number(a.canComplete)||(a.canComplete?0:a.attempted-b.attempted));
+    for(const {route} of candidates){
+        const sample=inspectionOrder([route]).map(item=>item.sample).find(sample=>!state.evidence[route.id+':'+sample.id]);
+        if(!sample)continue;
+        state.lookups++;state.analyses++;
+        state.evidence[route.id+':'+sample.id]={sampleId:sample.id,stage:'reserved',status:'unknown',reason:'이 구간을 분석하고 있습니다.',checkedAt:new Date().toISOString()};
+        return {kind:'capture',route,sample};
     }
     if(Object.values(state.evidence).some(item=>item.stage==='reserved'||item.review?.state==='reserved'))return null;
     state.phase='limited';
-    state.notice='현재 영상 근거와 이동 조건으로 추천할 수 있는 경로를 찾지 못했습니다. 미확인 연결부와 조건부 후보를 확인하세요.';
+    state.notice='거리영상 확인을 마쳤습니다. 확인하지 못한 연결부는 시설 안내나 현장에서 확인하세요.';
     return null;
 }
 export async function advanceJourneyState(state:JourneyState,operation:JourneyOperation,config:ServerConfig,signal:AbortSignal,deps:JourneyDependencies=dependencies,onCapture?:CaptureObserver):Promise<void>{
@@ -284,7 +284,7 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
             if(providerStairSamples(candidate,state.profile).length||!validateCandidate(candidate,baseline,state.exclusions).ok||!routeIsDistinct(candidate,state.candidates.filter(route=>!route.graphSegment)))return;
             const graph=await (deps.loadPedestrianGraph??loadPedestrianGraph)(candidate,signal,config.osmEndpoint);
             signal.throwIfAborted();
-            const alternative=prepareRoute(candidate,state.profile,state.goal,state.start,state.end,graph);
+            const alternative=prepareRoute(candidate,state.profile,state.goal,graph);
             if(alternative.barriers?.length)return;
             alternative.grade=(await loadRouteGrades([alternative],signal))[alternative.id];
             alternative.name='우회 후보';alternative.detourReason='장애 또는 미확인 연결부를 피하도록 조회한 후보입니다. 영상 확인은 아직 필요합니다.';
@@ -307,7 +307,7 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
                 const result=await deps.analyzeKhuViews({apiKey:config.ai,model:config.model,views:captured.views.map(view=>({id:view.id,image:view.image.image})),profile:state.profile,context:'재검토 원인: '+review.reason+'\n원래 관찰: '+JSON.stringify(review.initialFinding)+'\n'+captured.context,signal:AbortSignal.any([signal,AbortSignal.timeout(35000)])});
                 const independent=captured.views.filter(view=>hasIndependentPanorama(review.initialSource,view.image.source)).map(view=>view.id);
                 const joint=validateJointFinding(result.review,captured.views.map(view=>view.id),independent,review.reason);
-                const crossing=sample.target==='crossing-entry'||sample.target==='crossing-exit';
+                const crossing=sample.target==='crossing-entry'||sample.target==='crossing-exit'||sample.target==='underpass-entry';
                 const misplacedSupport=crossing&&joint.supportIds.some(id=>{const view=captured.views.find(item=>item.id===id);return view&&pointsAwayFromTarget(view.image.source,sample);});
                 if(misplacedSupport&&joint.finding.status!=='unknown'){
                     joint.finding={...joint.finding,status:'unknown',visibility:'unobservable',routeMatch:'uncertain',pathVisible:false,reviewReason:'framing',reason:'근거 사진의 촬영 방향이 목표 횡단 연결부를 향하지 않아 해당 지점의 판정에 사용할 수 없습니다.',observation:{...joint.finding.observation,connection:'unobservable',surface:'unobservable',uncertainty:'framing'}};
@@ -319,7 +319,7 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
                     const supporting=review.sources.find(view=>review.supportIds.includes(view.id));
                     if(supporting)item.source=supporting.source;
                 }
-                if(review.reason==='framing'&&joint.finding.status==='unknown'&&(joint.finding.visibility==='occluded'||joint.finding.observation.uncertainty==='occlusion')&&state.lookups<60&&state.analyses<48){
+                if(review.reason==='framing'&&joint.finding.status==='unknown'&&(joint.finding.visibility==='occluded'||joint.finding.observation.uncertainty==='occlusion')){
                     review.reason='occlusion';review.state='pending';
                     review.note='시선을 돌려도 연결부가 가려져 다른 촬영 위치에서 다시 확인합니다.';
                 }
@@ -340,7 +340,9 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
     let image;
     try {
         const target=sample.critical?sample.coord:pointAt(route.coords,sample.along+10);
-        image=await deps.streetImage(sample,config,signal,target?{target}:{});
+        const camera=sample.acquisition?underpassApproachSamples(route,sample,[12])[0]?.sample:sample;
+        image=camera?await deps.streetImage(camera,config,signal,target?{target}:{}):null;
+        if(image&&!underpassCameraMatches(route,sample,image.source.coord))image=null;
     } catch(error){
         signal.throwIfAborted();state.evidence[key]={sampleId:sample.id,stage:'processed',status:'unknown',failure:'service',reason:'거리영상 서비스 연결에 실패했습니다. 현장 통행 장애 판정이 아닙니다.',checkedAt:new Date().toISOString()};
         state.phase='limited';state.notice=config.imageryProvider==='google'?googleErrorNotice:imageryOutageNotice;return;
@@ -357,9 +359,9 @@ export async function advanceJourneyState(state:JourneyState,operation:JourneyOp
     try {
         const context=routeImageContext({route,sample,source:image.source})+(sample.target==='entrance'?'\n사용자가 명시한 건물 진입 목표: '+state.end.name+'. 장소 좌표는 출입문 위치가 검증된 좌표가 아니다. 이 건물의 실제 출입문 연결을 관찰하되 앞 도로 도착을 건물 진입과 혼동하지 않는다.':'');
         const result=await deps.analyzeKhuImage({apiKey:config.ai,model:config.model,image:image.image,profile:state.profile,context,signal});
-        const crossing=sample.target==='crossing-entry'||sample.target==='crossing-exit';
+        const crossing=sample.target==='crossing-entry'||sample.target==='crossing-exit'||sample.target==='underpass-entry';
         const missesTarget=crossing&&pointsAwayFromTarget(image.source,sample);
-        const opposed=sample.target==='crossing-entry'&&Math.abs(((sample.heading-image.source.heading+540)%360)-180)>100;
+        const opposed=sample.target==='crossing-entry'&&Math.abs(((sample.heading-image.source.heading+540)%360)-180)>100||sample.target==='underpass-entry'&&pointsAwayFromTarget(image.source,sample);
         const finding=(missesTarget||opposed&&result.finding.status!=='blocked')?{
             ...result.finding,status:'unknown' as const,pathVisible:false,routeMatch:'uncertain' as const,visibility:'unobservable' as const,reviewReason:'framing' as const,
             reason:missesTarget?'카메라가 목표 횡단 연결부를 등지고 있어 해당 지점을 확인할 수 없습니다.':'카메라가 횡단 진행 방향의 반대쪽을 보고 있어 진입부와 진행 연결을 함께 확인할 수 없습니다.',

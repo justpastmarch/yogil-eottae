@@ -1,8 +1,11 @@
+import {assessRouteAdmission} from '../lib/domain.ts';
+import {gradeBand,UNKNOWN_GRADE} from '../app/grade-colors.ts';
 import {chromium} from '../services/roadview-renderer/node_modules/playwright/index.mjs';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import {crossingPointControl,ensureNativeInputBounds} from './ux-refresh-driver-utils.mjs';
 
 // Run against the corresponding real provider checkout/server; this does not switch production providers.
 const provider=process.env.MAP_PROVIDER??'naver';
@@ -10,9 +13,10 @@ assert.ok(['kakao','naver'].includes(provider),'MAP_PROVIDER must be kakao or na
 const base=new URL(process.env.MAP_BASE_URL??'http://localhost:3000/');
 assert.ok(['localhost','127.0.0.1','[::1]'].includes(base.hostname),'MAP_BASE_URL must be a real localhost server');
 assert.equal(base.username+base.password+base.search+base.hash,'','Do not put credentials in MAP_BASE_URL');
-const output=fileURLToPath(new URL(`../.sites-runtime/naver-migration/${provider}-parity/`,import.meta.url));
+const output=process.env.MAP_REPORT_DIR??fileURLToPath(new URL(`../.sites-runtime/naver-migration/${provider}-parity/`,import.meta.url));
 await mkdir(output,{recursive:true});
-const report={provider,base:base.origin,startedAt:new Date().toISOString(),status:'failed',scope:'Real SDK, real provider tiles and real local routing. Analysis advance held and real jobs canceled; no AI/accessibility findings asserted.',checks:[],errors:[],syntheticUIOnly:null};
+const entranceBoundary={mode:'CONTROLLED TECHNICAL FAILURE',httpStatus:503,requests:0,actualEntranceAnalysis:false};
+const report={provider,base:base.origin,startedAt:new Date().toISOString(),status:'failed',scope:'Real SDK, real provider tiles and real local routing. Analysis advance held, automatic entrance requests receive a controlled technical failure, and real jobs canceled; no AI/accessibility findings asserted.',checks:[],errors:[],syntheticUIOnly:null,entranceBoundary};
 let browser,context,page,latest,journeyInputs,synthetic=false,syntheticRouteId,syntheticRouteName,releaseAdvance=Promise.withResolvers();
 const jobs=new Set(),canceled=new Set();
 const redact=value=>String(value).replace(/https?:\/\/[^\s<>"']+/g,raw=>{try{const url=new URL(raw);return `${url.origin}/[url-redacted]`;}catch{return '[url-redacted]';}}).replace(/((?:client[_-]?id|ncpKeyId|appkey|api[_-]?key|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[redacted]');
@@ -77,6 +81,7 @@ function instrumentRealSDK(expectedProvider){
 async function snapshot(){return page.evaluate(()=>window.__mapParity.snapshot());}
 function sameCoords(actual,expected){return actual.length===expected.length&&actual.every((coord,index)=>coord.every((value,axis)=>Math.abs(value-expected[index][axis])<1e-8));}
 async function tiles(label){
+ check('native window and CSS viewport',await ensureNativeInputBounds(page));
  // Logos, panorama/source photographs, tracking pixels, and unloaded image placeholders cannot satisfy this check.
  const inspect=({provider})=>{const loaded=[...document.querySelectorAll('.map img')].flatMap(image=>{
   const url=(()=>{try{return new URL(image.currentSrc||image.src);}catch{return null;}})(),box=image.getBoundingClientRect(),map=image.closest('.map').getBoundingClientRect();
@@ -93,19 +98,19 @@ async function waitCenter(expected){
 function syntheticIssues(data){
  const clone=structuredClone(data),route=clone.journey.routes.find(candidate=>candidate.id===syntheticRouteId)??clone.journey.routes.find(candidate=>candidate.name===syntheticRouteName);
  if(route)syntheticRouteId=route.id;
- assert.ok(route?.samples.length>=3,'Real route must have three sample locations for synthetic color UI coverage');
- const samples=[route.samples[0],route.samples[Math.floor((route.samples.length-1)/2)],route.samples.at(-1)];
- assert.equal(new Set(samples.map(sample=>sample.id)).size,3,'Synthetic UI markers need distinct real samples');
- const issues=samples.map((sample,index)=>({id:`${route.id}:${sample.id}`,sampleId:sample.id,coord:sample.coord,along:sample.along,status:['clear','caution','blocked'][index],source:'imagery',reason:'SYNTHETIC UI-ONLY: marker color exercise; no imagery observation or access evidence.',action:'SYNTHETIC UI-ONLY: do not use for travel or accessibility guidance.'}));
+ assert.ok(route?.samples.length>=2,'Real route must have two sample locations for controlled marker UI coverage');
+ const samples=[route.samples[Math.floor((route.samples.length-1)/3)],route.samples[Math.ceil((route.samples.length-1)*2/3)]];
+ const issues=samples.map((sample,index)=>({id:`${route.id}:${sample.id}`,sampleId:sample.id,coord:sample.coord,along:sample.along,status:['caution','blocked'][index],source:'imagery',reason:'CONTROLLED UI ONLY: marker interaction exercise; not an imagery observation.',action:'CONTROLLED UI ONLY: not travel or accessibility evidence.'}));
  const assessment=clone.journey.assessments[route.id];
- assessment.decision={...assessment.decision,kind:'hold',reason:'SYNTHETIC UI-ONLY: no real access finding.',action:'Do not navigate using these synthetic UI states.',issues:[...assessment.decision.issues.filter(issue=>!issues.some(item=>item.id===issue.id)),...issues]};
- clone.journey.recommendedId=null;
+ assessment.decision={...assessment.decision,issues:[...assessment.decision.issues.filter(issue=>!issues.some(item=>item.id===issue.id)),...issues]};
+ assessment.admission=assessRouteAdmission({route,decision:assessment.decision,blockedPassageIds:assessment.blockedPassageIds,maxSlope:clone.journey.maxSlope});
  return clone;
 }
 async function startJourney(){
  if(!await page.locator('.search-button').isVisible())await page.locator('.results-controls button').click();
  await page.locator('.search-button').click();
  await page.locator('.route-card').first().waitFor({timeout:90000});
+ await page.locator('.place-entrance [role=alert]').waitFor();assert.ok(entranceBoundary.requests>0,'Submitted trips must request entrance confirmation automatically');assert.equal(await page.locator('.place-entrance .entrance-photos').count(),0,'A controlled service failure must not invent entrance photos or a verdict');
  const stop=page.getByRole('button',{name:'중지',exact:true});
  await stop.waitFor({timeout:10000});await stop.click();
  await page.waitForFunction(()=>!document.querySelector('.progress button'));
@@ -117,6 +122,26 @@ async function selectRoute(route){
  await page.waitForFunction(expected=>window.__mapParity.snapshot().lines.some(line=>line.weight===7&&JSON.stringify(line.coords)===JSON.stringify(expected)),route.coords,{timeout:10000});
 }
 async function screenshot(name){await page.screenshot({path:path.join(output,name+'.png')});}
+async function exerciseMarker(markerId,scope){
+ const marker=page.locator('.map .map-evidence-hit[data-evidence-id='+JSON.stringify(markerId)+']');
+ await marker.focus();
+ const beforeRedraw=await page.evaluate(()=>window.__mapParity.overlays.length);
+ assert.equal(await page.evaluate(()=>document.activeElement?.dataset.evidenceId),markerId);
+ await page.locator('.route-map-details .terrain-profile [data-grade-index="0"]').dispatchEvent('click');
+ await page.waitForFunction(({id,before})=>window.__mapParity.overlays.length>before&&document.activeElement?.dataset.evidenceId===id,{id:markerId,before:beforeRedraw},{timeout:5000});
+ check('marker focus survives grade overlay redraw',{evidenceId:markerId,scope});
+ for(const activation of ['mouse','Enter','Space','touch']){
+  const target=page.locator('.map .map-evidence-hit[data-evidence-id='+JSON.stringify(markerId)+']'),before=(await snapshot()).clicks;
+  if(activation==='mouse')await target.click();else if(activation==='touch')await target.tap();else{await target.focus();await target.press(activation);}
+  await page.locator('.route-details').waitFor();
+  await page.locator('.detail-point.focused,.action-issue.focused').first().waitFor();
+  assert.equal(await page.locator('.map .map-evidence-hit[data-evidence-id='+JSON.stringify(markerId)+']').getAttribute('aria-pressed'),'true');
+  assert.equal((await snapshot()).clicks,before,`${activation} evidence activation must not invoke app background map callback`);
+  check('isolated evidence activation',{activation,evidenceId:markerId,scope});
+  await page.getByRole('button',{name:'경로 목록으로',exact:true}).click();
+  assert.equal(await page.evaluate(()=>document.activeElement?.classList.contains('route-detail-button')),true,'Back restores focus to route detail opener');
+ }
+}
 async function backgroundClick(){
  const point=await page.locator('.map').evaluate(element=>{
   const box=element.getBoundingClientRect();
@@ -136,6 +161,7 @@ async function backgroundClick(){
 try{
  browser=await chromium.launch({channel:'chrome',headless:true,args:['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--enable-webgl','--ignore-gpu-blocklist']});
  context=await browser.newContext({viewport:{width:1440,height:960},hasTouch:true});
+ await context.route('**/api/entrance',route=>{entranceBoundary.requests++;return route.fulfill({status:503,json:{error:'CONTROLLED TECHNICAL FAILURE: entrance service withheld; no image analysis performed'}});});
  await context.addInitScript(instrumentRealSDK,provider);page=await context.newPage();
  page.on('pageerror',error=>report.errors.push(redact(error.message)));
  await page.route('**/api/action',async route=>{
@@ -162,8 +188,8 @@ try{
  check('real SDK instance',{provider,maps:initial.maps});
  const calibration=await backgroundClick();assert.ok(calibration.every(Number.isFinite),'Actual map click callback must expose geographic coordinates');
  check('actual map callback positive calibration',{coord:calibration});
- await page.locator('#from').fill('수원시 영통구 영통동 992-1');
- await page.locator('#to').fill('경희대학교 국제캠퍼스 학생회관');
+ await page.locator('#from').fill('경희대학교 국제캠퍼스 예술디자인대학관');
+ await page.locator('#to').fill('맥도날드 경희대국제캠퍼스점');
  await startJourney();
  const real=structuredClone(latest),routes=real.journey.routes;
  check('actual resolved endpoints',{start:journeyInputs.start.coord,end:journeyInputs.end.coord});
@@ -173,15 +199,16 @@ try{
  for(const route of routes){
   await selectRoute(route);
   const rendered=await snapshot();
-  for(const candidate of routes)assert.ok(rendered.lines.some(line=>sameCoords(line.coords,candidate.coords)&&line.color==='#8b95a3'&&line.weight===(candidate.id===route.id?7:5)),`Actual route geometry/selected width missing: ${candidate.id}`);
-  for(const [label,place] of [['출발지',journeyInputs.start],['도착지',journeyInputs.end]]){
-   assert.ok(rendered.overlays.some(overlay=>overlay.label===label&&sameCoords([overlay.coord],[place.coord])),`${label} marker must use the actual resolved place coordinate`);
+  for(const candidate of routes)assert.ok(rendered.lines.some(line=>sameCoords(line.coords,candidate.coords)&&line.color===UNKNOWN_GRADE.color&&line.weight===(candidate.id===route.id?7:5)),`Actual route geometry/selected width missing: ${candidate.id}`);
+  const endpoints=route.graphSegment?[['출발지',journeyInputs.start.coord],['도착지',journeyInputs.end.coord]]:[['도보 출발점',route.coords[0]],['도보 도착점',route.coords.at(-1)]];
+  for(const [label,coord] of endpoints){
+   assert.ok(rendered.overlays.some(overlay=>overlay.label===label&&sameCoords([overlay.coord],[coord])),`${label} marker must use the returned walk path endpoint, not the POI centroid`);
    assert.equal(await page.locator('.map [aria-label='+JSON.stringify(label)+']').count(),1);
   }
   const crossings=route.samples.filter(sample=>sample.target==='crossing-entry').sort((a,b)=>a.along-b.along);
-  assert.equal(await page.locator('.crossing-map-label').count(),crossings.length,'Every actual crossing entry gets its numbered label');
+  assert.equal(await page.locator('.crossing-map-label').count(),crossings.length,'Every actual crossing entry remains available individually, including clustered labels');
   for(let index=0;index<crossings.length;index++){
-   const badge=page.getByRole('button',{name:`횡단 진입점 ${index+1}, 출발 후 ${Math.round(crossings[index].along)}m, 지도 위치`,exact:true});
+   const badge=page.getByRole('button',{name:`횡단 진입점 ${index+1}, 출발 후 ${Math.round(crossings[index].along)}m, 지점 근거 보기`,exact:true,includeHidden:true});
    assert.equal(await badge.count(),1);crossingCount++;
   }
   gradeSegments+=route.grade&&route.grade.status!=='unavailable'?route.grade.segments.length:0;
@@ -192,49 +219,45 @@ try{
  const chosen=routes.find(route=>!route.graphSegment&&route.samples.length>=3&&route.samples.some(sample=>sample.target==='crossing-entry')&&route.grade?.segments.length);
  assert.ok(chosen,'Need a complete real route with crossing samples, grade segments and three sample locations');
  syntheticRouteId=chosen.id;syntheticRouteName=chosen.name;await selectRoute(chosen);
- await page.locator('.route-map-details > summary').click();
- const threshold=page.getByRole('combobox',{name:'경사 강조 기준',exact:true});
+ const mapDetails=page.locator('.route-map-details');assert.equal(await mapDetails.getAttribute('open'),null,'Main grade and crossing detail is collapsed by default');assert.equal(await mapDetails.locator('.terrain-profile').isVisible(),false);await mapDetails.locator(':scope > summary').filter({hasText:'경사·횡단 상세'}).click();assert.equal(await mapDetails.locator('.terrain-profile').isVisible(),true,'The disclosed profile uses the real route terrain');
+ await page.locator('.map-display-options > summary').click();
+ const threshold=page.getByRole('combobox',{name:'경사 통계 기준',exact:true});
+ const expectedSegments=chosen.grade.segments.map(segment=>({coords:segment.coords,color:gradeBand(segment.gradePercent).color}));
  for(const value of [5,8,12]){
   await threshold.selectOption(String(value));
-  await page.waitForFunction(({segments,value})=>{
-   const lines=window.__mapParity.snapshot().lines.filter(line=>line.weight===9);
-   return lines.length===segments.length&&segments.every(segment=>lines.some(line=>JSON.stringify(line.coords)===JSON.stringify(segment.coords)&&line.color===(Math.abs(segment.gradePercent)>=value?'#9f1239':'#0f766e')&&line.style===(segment.gradePercent<0?'shortdash':'solid')));
-  },{segments:chosen.grade.segments,value},{timeout:10000});
-  check('real estimated grade threshold',{threshold:value,segments:chosen.grade.segments.length,meaning:'30m terrain estimate, not access/passability evidence'});
+  await page.waitForFunction(expected=>{const lines=window.__mapParity.snapshot().lines;return expected.every(segment=>lines.some(line=>line.color===segment.color&&line.weight===7&&line.zIndex===4&&JSON.stringify(line.coords)===JSON.stringify(segment.coords)));},expectedSegments,{timeout:10000});
+  const lines=(await snapshot()).lines;
+  assert.ok(lines.some(line=>sameCoords(line.coords,chosen.coords)&&line.color===UNKNOWN_GRADE.color&&line.weight===7&&line.zIndex===3),'Selected base keeps gaps gray');
+  assert.equal(lines.filter(line=>line.zIndex===4).length,expectedSegments.length,'Only actual measured segments receive foreground grade colors');
+  for(const segment of expectedSegments)assert.ok(lines.some(line=>sameCoords(line.coords,segment.coords)&&line.color===segment.color&&line.weight===7&&line.zIndex===4),'Actual foreground grade color remains fixed when the statistics threshold changes');
+  const expectedCount=chosen.grade.segments.filter(segment=>Math.abs(segment.gradePercent)>=value).length;
+  assert.ok((await page.locator('.route-map-details .terrain-summary').innerText()).includes(expectedCount?`${expectedCount}구간`:`${value}% 이상 경사 없음`),'Statistics threshold still changes the numeric summary');
+  check('fixed foreground grade colors and configurable statistics',{threshold:value,segments:expectedSegments.length,meaning:'Absolute-grade 10/20 display bands, not access/passability evidence'});
  }
  await threshold.selectOption('8');
- const markerId=await page.locator('.map [data-evidence-id]').evaluateAll(elements=>elements.find(element=>{
-  const box=element.getBoundingClientRect(),target=document.elementFromPoint(box.x+box.width/2,box.y+box.height/2);
-  return box.width>0&&target?.closest('[data-evidence-id]')===element;
- })?.dataset.evidenceId);
- assert.ok(markerId,'A real decision marker must be visible and pointer-accessible');
- const marker=page.locator('.map [data-evidence-id='+JSON.stringify(markerId)+']');await marker.focus();
- assert.equal(await page.evaluate(()=>document.activeElement?.dataset.evidenceId),markerId);
- await threshold.selectOption('12');
- await page.waitForFunction(id=>document.activeElement?.dataset.evidenceId===id,markerId,{timeout:5000});
- check('marker focus survives actual grade overlay redraw',{evidenceId:markerId});
- await screenshot('desktop-real-routes');
- // Exercise all native button activation paths and verify the instrumented app background listener stays silent.
- for(const activation of ['mouse','Enter','Space','touch']){
-  const target=page.locator('.map [data-evidence-id='+JSON.stringify(markerId)+']'),before=(await snapshot()).clicks;
-  if(activation==='mouse')await target.click();else if(activation==='touch')await target.tap();else{await target.focus();await target.press(activation);}
-  await page.locator('.route-details').waitFor();
-  await page.locator('.detail-point.focused,.action-issue.focused').first().waitFor();
-  assert.equal(await page.locator('.map [data-evidence-id='+JSON.stringify(markerId)+']').getAttribute('aria-pressed'),'true');
-  assert.equal((await snapshot()).clicks,before,`${activation} evidence activation must not invoke app background map callback`);
-  check('isolated evidence activation',{activation,evidenceId:markerId});
-  await page.getByRole('button',{name:'경로 목록으로',exact:true}).click();
-  assert.equal(await page.evaluate(()=>document.activeElement?.classList.contains('route-detail-button')),true,'Back restores focus to route detail opener');
+ if(await page.locator('.map .map-evidence-hit').count()){
+  await page.locator('.route-card.selected .route-detail-button').click();await page.locator('.detail-all-points > summary').click();
+  const id=await page.locator('.map .map-evidence-hit').first().getAttribute('data-evidence-id');
+  const point=page.locator('.detail-all-points button[data-evidence-id='+JSON.stringify(id)+']');assert.equal(await point.count(),1);await point.click();await page.getByRole('button',{name:'경로 목록으로',exact:true}).click();
  }
+ const markerId=await page.locator('.map .map-evidence-hit').evaluateAll(elements=>elements.find(element=>{
+  const box=element.getBoundingClientRect(),target=document.elementFromPoint(box.x+box.width/2,box.y+box.height/2);
+  return box.width>=44&&box.height>=44&&target?.closest('.map-evidence-hit')===element;
+ })?.dataset.evidenceId);
+ assert.ok(markerId||await page.locator('.map .map-evidence-hit').count()===0,'Actual meaningful issue markers must retain 44px usable hit areas; controlled coverage cannot hide a broken real marker');
+ if(markerId)await exerciseMarker(markerId,'actual routing issue metadata; no AI inference');
+ else check('pending photos do not require map markers',{markers:0,meaning:'No meaningful obstacle/facility issue is a normal map state, not a missing-data failure'});
+ await screenshot('desktop-real-routes');
  const crossing=chosen.samples.filter(sample=>sample.target==='crossing-entry').sort((a,b)=>a.along-b.along)[0];
- await page.locator('.route-map-details').getByRole('button',{name:`횡단 1 · 출발 후 ${Math.round(crossing.along)}m 위치 보기`,exact:true}).click();
- await waitCenter(crossing.coord);
+ await page.locator('.route-map-details .terrain-crossings > summary').click();
+ await page.locator('.route-map-details .terrain-crossing-points button[data-evidence-id='+JSON.stringify(chosen.id+':'+crossing.id)+']').click();await page.locator('.route-details').waitFor();await waitCenter(crossing.coord);await page.getByRole('button',{name:'경로 목록으로',exact:true}).click();
  for(const activation of ['mouse','Enter','Space','touch']){
-  const before=(await snapshot()).clicks,badge=page.locator('.crossing-map-label').first();
+  const id=chosen.id+':'+crossing.id,badge=await crossingPointControl(page,id);
+  const before=(await snapshot()).clicks,rect=await badge.boundingBox();assert.ok(rect&&rect.width>=44&&rect.height>=44);
   if(activation==='mouse')await badge.click();else if(activation==='touch')await badge.tap();else{await badge.focus();await badge.press(activation);}
-  await waitCenter(crossing.coord);
+  await waitCenter(crossing.coord);await page.locator('.detail-point.focused[data-evidence-id='+JSON.stringify(id)+']').waitFor();
   assert.equal((await snapshot()).clicks,before,`${activation} crossing activation must not invoke app background callback`);
-  check('isolated real crossing focus',{activation,coord:crossing.coord});
+  check('isolated real crossing detail activation',{activation,coord:crossing.coord,rect});await page.getByRole('button',{name:'경로 목록으로',exact:true}).click();
  }
  // Resizing must preserve explicit location focus, not refit route bounds.
  const centerBefore=(await snapshot()).center;
@@ -248,28 +271,30 @@ try{
  await page.locator('.route-card.selected .route-detail-button').click();await page.locator('.detail-body').waitFor();await screenshot('mobile-real-details');
  await page.getByRole('button',{name:'경로 목록으로',exact:true}).click();
  check('sidebar mobile resize and detail back',{mobileMapHeight:mobileMap.height,preservedFocusCenter:centerBefore});
- // Controlled issues exercise colors only. Original real route geometry/grades/evidence are not replaced.
- await page.setViewportSize({width:1440,height:960});synthetic=true;releaseAdvance=Promise.withResolvers();
- await startJourney();
- const syntheticRoute=latest.journey.routes.find(route=>route.id===syntheticRouteId);assert.ok(syntheticRoute);
- const alternate=latest.journey.routes.find(route=>route.id!==syntheticRoute.id);
- if(alternate)await selectRoute(alternate);
- await selectRoute(syntheticRoute);
- await page.evaluate(()=>{const banner=document.createElement('div');banner.dataset.syntheticUiOnly='true';banner.textContent='SYNTHETIC UI-ONLY marker colors — no real imagery finding, access or travel recommendation';banner.style.cssText='position:fixed;bottom:0;left:0;right:0;z-index:99999;background:#fff3cd;color:#402800;font:14px sans-serif;padding:10px;text-align:center';document.body.append(banner);});
- const colored=latest.journey.assessments[syntheticRoute.id].decision.issues.filter(issue=>issue.reason.startsWith('SYNTHETIC UI-ONLY:'));
- for(const issue of colored){
-  const dot=page.locator('.map [data-evidence-id='+JSON.stringify(issue.id)+']');
-  assert.match(await dot.getAttribute('aria-label'),/SYNTHETIC UI-ONLY/);
-  const background=await dot.evaluate(element=>getComputedStyle(element).backgroundColor),expected={clear:'rgb(37, 132, 100)',caution:'rgb(221, 107, 32)',blocked:'rgb(229, 62, 62)'}[issue.status];
-  assert.equal(background,expected,'Synthetic issue color parity');
+ // Only absent real meaningful markers require a controlled state. Geometry, grades and SDK stay real.
+ if(!markerId){
+  await page.setViewportSize({width:1440,height:960});synthetic=true;releaseAdvance=Promise.withResolvers();
+  await startJourney();
+  const syntheticRoute=latest.journey.routes.find(route=>route.id===syntheticRouteId);assert.ok(syntheticRoute);
+  await selectRoute(syntheticRoute);
+  await page.evaluate(()=>{const banner=document.createElement('div');banner.dataset.syntheticUiOnly='true';banner.textContent='CONTROLLED UI ONLY — marker interactions, not imagery findings or accessibility evidence';banner.style.cssText='position:fixed;bottom:0;left:0;right:0;z-index:99999;background:#fff3cd;color:#402800;font:14px sans-serif;padding:10px;text-align:center';document.body.append(banner);});
+  const colored=latest.journey.assessments[syntheticRoute.id].decision.issues.filter(issue=>issue.reason.startsWith('CONTROLLED UI ONLY:'));
+  for(const issue of colored){
+   const dot=page.locator('.map .map-evidence-hit[data-evidence-id='+JSON.stringify(issue.id)+'] .map-evidence-dot');
+   const background=await dot.evaluate(element=>getComputedStyle(element).backgroundColor),expected={caution:'rgb(221, 107, 32)',blocked:'rgb(229, 62, 62)'}[issue.status];
+   assert.equal(background,expected,'Controlled meaningful issue color parity');
+  }
+  if(await mapDetails.getAttribute('open')===null)await mapDetails.locator(':scope > summary').click();
+  if(await page.locator('.map-display-options').getAttribute('open')===null)await page.locator('.map-display-options > summary').click();
+  await exerciseMarker(colored[0].id,'CONTROLLED UI ONLY; no imagery findings injected');
+  report.syntheticUIOnly={label:'CONTROLLED UI ONLY, not real access evidence',states:colored.map(issue=>({id:issue.id,status:issue.status,coord:issue.coord})),findingsInjected:false,gradesInjected:false};
+  await screenshot('controlled-ui-only-marker-interactions');
  }
- report.syntheticUIOnly={label:'SYNTHETIC UI-ONLY, not real access evidence',states:colored.map(issue=>({id:issue.id,status:issue.status,coord:issue.coord})),findingsInjected:false,gradesInjected:false,recommendationInjected:false};
- await screenshot('synthetic-ui-only-marker-colors');
  // Finish with a genuine coordinate pick through the actual app map click, never an internal React setter.
  await page.locator('.results-controls button').click();
  await page.getByRole('button',{name:'출발지 지도에서 선택',exact:true}).click();
- const picked=await backgroundClick();await page.waitForFunction(()=>document.querySelector('#from')?.value.startsWith('선택한 출발지'));
- assert.match(await page.locator('#from').inputValue(),new RegExp(picked[1].toFixed(5).replace('.','\\.')+', '+picked[0].toFixed(5).replace('.','\\.')));
+ const picked=await backgroundClick();await page.waitForFunction(expected=>window.__mapParity.snapshot().overlays.some(overlay=>overlay.label==='출발지'&&overlay.coord.every((value,index)=>Math.abs(value-expected[index])<1e-8)),picked,{timeout:10000});
+ assert.equal(await page.getByRole('button',{name:'경로 찾기',exact:true}).isVisible(),true,'Picking a coordinate must return to an actionable search form');
  check('actual coordinate picking',{coord:picked});
  assert.deepEqual(report.errors,[],'Browser errors must not be ignored');report.status='passed';
 }catch(error){

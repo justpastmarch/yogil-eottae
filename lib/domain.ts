@@ -20,7 +20,7 @@ export const observationSchema = z.object({
     connection:z.enum(['flush','ramp','raised','stairs','unobservable','not-applicable']),
     surface:z.enum(['continuous','uneven','unpaved','unobservable']),
     uncertainty:z.enum(['none','framing','occlusion','corridor']),
-    target:z.enum(['sidewalk','crossing-entry','crossing-exit','arrival','entrance','unspecified']),
+    target:z.enum(['sidewalk','crossing-entry','crossing-exit','arrival','entrance','underpass-entry','unspecified']),
     reason:z.string().min(1).max(1000),
 });
 export const findingSchema = z.object({
@@ -36,6 +36,7 @@ export const findingSchema = z.object({
     observation: observationSchema.optional(),
 });
 export type Finding = z.infer<typeof findingSchema>;
+export const sampleAcquisitionSchema=z.object({kind:z.literal('underpass-entry'),connectionId:z.string(),wayId:z.number().int().positive(),nodeId:z.string(),snapshotAt:z.string()});
 export type Sample = {
     id: string;
     coord: Coord;
@@ -43,6 +44,7 @@ export type Sample = {
     along: number;
     critical: boolean;
     target?:z.infer<typeof observationSchema>['target'];
+    acquisition?:z.infer<typeof sampleAcquisitionSchema>;
 };
 export type Route = {
     id: string;
@@ -60,7 +62,7 @@ export type Route = {
     detourReason?: string;
     barriers?: RouteBarrier[];
     unresolvedCrossings?:{id:string;coord:Coord;along:number;count:number;source?:'osm'}[];
-    unverifiedConnections?:{id:string;kind:'station'|'underpass'|'elevator'|'origin'|'destination';coord:Coord;along:number;reason:string}[];
+    unverifiedConnections?:{id:string;kind:'station'|'underpass'|'elevator';coord:Coord;along:number;reason:string}[];
     crossingSources?:{provider:'openstreetmap';snapshotAt:string;wayIds:number[];along:number}[];
     graphCoverage?:{status:'available'|'unavailable';reason?:'not-configured'|'network'|'incomplete'|'too-large'|'no-data';snapshotAt?:string};
     graphSegment?:{provider:'openstreetmap';snapshotAt:string;startGapMeters:number;endGapMeters:number;sharedRoadMeters:number};
@@ -81,7 +83,7 @@ export type BlockedPassage = {
 export const routeIssueSchema = z.object({
     id:z.string(),sampleId:z.string(),coord:z.tuple([z.number(),z.number()]),along:z.number(),
     status:z.enum(['clear','caution','blocked','unknown']),reason:z.string(),action:z.string(),
-    source:z.enum(['imagery','provider','geometry','osm','coverage','service']),
+    source:z.enum(['imagery','provider','osm','coverage','service']),
 });
 export type RouteIssue = z.infer<typeof routeIssueSchema>;
 export const routeExplorationSchema=z.object({state:z.enum(['searching','finished','interrupted']),attempts:z.number().int().nonnegative(),alternatives:z.number().int().nonnegative(),reason:z.string()});
@@ -101,7 +103,23 @@ export function hasOnlyProviderBarriers(decision:RouteDecision):boolean{
     }
     return found;
 }
-export type RouteAssessments=Record<string,{blockedPassageIds:string[];decision:RouteDecision}>;
+export const routeAdmissionSchema=z.discriminatedUnion('kind',[
+    z.object({kind:z.literal('available'),reason:z.string()}),
+    z.object({kind:z.literal('blocked'),cause:z.enum(['disconnected','obstacle']),reason:z.string()}),
+    z.object({kind:z.literal('requires-check'),cause:z.enum(['structure','slope-constraint']),reason:z.string()}),
+]);
+export type RouteAdmission=z.infer<typeof routeAdmissionSchema>;
+export const routeAssessmentSchema=z.object({blockedPassageIds:z.array(z.string()),decision:routeDecisionSchema,admission:routeAdmissionSchema});
+export type RouteAssessments=Record<string,z.infer<typeof routeAssessmentSchema>>;
+export function assessRouteAdmission({route,decision,blockedPassageIds,maxSlope}:{route:Route;decision:RouteDecision;blockedPassageIds:string[];maxSlope?:number|null}):RouteAdmission{
+    if(route.graphSegment||route.coords.length<2)return {kind:'blocked',cause:'disconnected',reason:'출발지와 도착지까지 이어지는 전체 이동 경로가 아닙니다.'};
+    const obstacle=decision.issues.find(issue=>issue.status==='blocked');
+    if(blockedPassageIds.length||obstacle)return {kind:'blocked',cause:'obstacle',reason:obstacle?.reason??'다른 후보에서 확인한 장애 통로와 겹치는 경로입니다.'};
+    const structure=route.unverifiedConnections?.[0];
+    if(structure)return {kind:'requires-check',cause:'structure',reason:structure.reason};
+    if(maxSlope!=null)return {kind:'requires-check',cause:'slope-constraint',reason:`요청한 최대 경사율 ${maxSlope}%를 확인할 정밀 보행면 측정 자료가 없습니다.`};
+    return {kind:'available',reason:'지도 제공자의 전체 도보 경로로 안내할 수 있습니다. 사진 미확인 구간과 현재 현장 상태는 별도로 확인하세요.'};
+}
 export const evidenceSourceSchema = z.object({
     url: z.string().url(), capturedAt: z.number().nullable(), capturedMonth: z.string().regex(/^20\d{2}-(0[1-9]|1[0-2])$/).optional(),
     coord: z.tuple([z.number(), z.number()]), distance: z.number(), heading: z.number().optional(), panoId:z.string().optional(),
@@ -170,7 +188,7 @@ export function evaluateRoute(route:Route,evidence:Record<string,Evidence>,block
         const verified=validateFinding(finding);
         if(item.review?.failure&&verified.status!=='blocked')return {...point,status:'unknown',source:'service',reason:item.review.note,action:'재확인 서비스 처리에 실패했습니다. 원래 관찰은 보존했지만 접근성 안내는 보류합니다.'};
         const targetMatches=!sample.target||sample.target==='unspecified'||observation.target===sample.target;
-        const requiredConnection=sample.target==='entrance'||sample.target==='crossing-entry'||sample.target==='crossing-exit';
+        const requiredConnection=sample.target==='entrance'||sample.target==='underpass-entry'||sample.target==='crossing-entry'||sample.target==='crossing-exit';
         if(!targetMatches)return {...point,status:'unknown',source:'imagery',reason:'사진의 관찰 대상이 필요한 연결부와 일치하지 않습니다.',action:'같은 연결부의 다른 촬영 위치를 확인하세요.'};
         const connectionVisible=observation.connection!=='unobservable'&&(!requiredConnection||['flush','ramp'].includes(observation.connection));
         if(verified.status==='blocked')return {...point,status:'blocked',source:'imagery',reason:describeFinding(verified),action:exploration.state==='searching'?'이 구간을 피하는 대체 경로를 찾습니다.':'이 구간을 피한 경로가 확인되어야 접근성 안내를 제공할 수 있습니다.'};
@@ -189,13 +207,13 @@ export function evaluateRoute(route:Route,evidence:Record<string,Evidence>,block
         const point:RouteIssue={id:route.id+':'+barrier.sampleId,sampleId:barrier.sampleId,coord:barrier.coord,along:barrier.along,status:'blocked',source:barrier.source??'provider',reason:barrier.source==='imagery'||barrier.source==='osm'?barrier.reason:barrier.reason+' '+verification,action:barrier.source==='imagery'?'같은 통로에서 영상으로 관찰한 장애 때문에 이 경로를 추천에서 제외했습니다.':barrier.source==='osm'?'보행망 지도의 계단·접근 제한 때문에 이 통로를 피하는 후보를 비교합니다. 영상으로 확인한 장애와는 구분합니다.':'길찾기의 계단 안내 때문에 안전상 추천에서 제외합니다. 사진에서 장애를 확인했다는 뜻은 아니며, 실제 영상 판독은 별도로 표시합니다.'};
         if(index<0)issues.push(point);else issues[index]=point;
     }
-    for(const crossing of route.unresolvedCrossings??[])issues.push({id:route.id+':'+crossing.id,sampleId:crossing.id,coord:crossing.coord,along:crossing.along,status:'unknown',source:crossing.source??'provider',reason:crossing.source==='osm'?'OpenStreetMap에서 횡단 선형을 발견했지만 이 경로의 횡단 연결부를 확정하지 못했습니다.':`${crossing.count}개 횡단보도의 필요한 연결부 위치를 지도 안내만으로 모두 확정할 수 없습니다.`,action:'일부 평탄한 노면만으로 이 횡단 전체를 통과 처리하지 않습니다. 연결부를 확인하거나 이 교차로를 피하는 대안을 비교해야 합니다.'});
-    for(const connection of route.unverifiedConnections??[])issues.push({id:route.id+':'+connection.id,sampleId:connection.id,coord:connection.coord,along:connection.along,status:'unknown',source:connection.kind==='origin'||connection.kind==='destination'?'geometry':'provider',reason:connection.reason,action:connection.kind==='origin'?'선택한 출발지에서 경로 시작점까지의 연결을 확인하거나 다른 후보를 비교하세요.':connection.kind==='destination'?'장소의 실제 출입구와 경로 끝의 연결을 확인하거나 다른 후보를 비교하세요.':'확인된 다른 경로나 시설 안내를 확인하세요. 이 지도 안내는 영상 판독 결과가 아닙니다.'});
+    for(const crossing of route.unresolvedCrossings??[])issues.push({id:route.id+':'+crossing.id,sampleId:crossing.id,coord:crossing.coord,along:crossing.along,status:'unknown',source:crossing.source??'provider',reason:crossing.source==='osm'?'OpenStreetMap에서 횡단 선형을 발견했지만 이 경로의 횡단 연결부를 확정하지 못했습니다.':`${crossing.count}개 횡단보도의 필요한 연결부 위치를 지도 안내만으로 모두 확정할 수 없습니다.`,action:'지도 자료에서 횡단 연결 위치를 확정하지 못했습니다. 관찰 지점의 사진 판독 결과는 별도로 표시합니다.'});
+    for(const connection of route.unverifiedConnections??[])issues.push({id:route.id+':'+connection.id,sampleId:connection.id,coord:connection.coord,along:connection.along,status:'unknown',source:'provider',reason:connection.reason,action:connection.kind==='elevator'?'엘리베이터 위치와 운행 상태를 시설 안내에서 확인하세요.':connection.kind==='station'?'역사 내 엘리베이터와 출구 연결을 역 시설 안내에서 확인하세요.':'지하보도의 계단·엘리베이터와 출입구 위치를 확인하거나 다른 경로를 선택하세요.'});
     issues.sort((a,b)=>a.along-b.along);
     const firstBlocked=issues.find(issue=>issue.status==='blocked');
     if(blockedPassageIds.length||firstBlocked){
         const reason=firstBlocked?`${Math.round(firstBlocked.along)}m 지점 · ${firstBlocked.source==='provider'?'지도 경로 안내 (영상 판독 결과 아님)':firstBlocked.source==='osm'?'보행망 지도 정보 (영상 판독 결과 아님)':'거리영상 관찰'}: ${firstBlocked.reason}`:'다른 후보에서 확인한 장애 통로와 겹쳐 이 경로의 접근성 안내를 막았습니다.';
-        return {kind:'detour',reason,action:exploration.state==='searching'?'이 통로를 피하는 다른 경로를 조회하고 있습니다.':exploration.reason,issues,exploration};
+        return {kind:'detour',reason,action:exploration.state==='searching'?'이 통로를 피하는 다른 경로를 찾고 있습니다.':'표시된 장애 지점을 피하는 다른 경로를 선택하세요.',issues,exploration};
     }
     if(maxSlope!=null)return {kind:'hold',reason:`요청한 최대 경사율 ${maxSlope}%를 확인할 정밀 보행면 측정 자료가 없습니다.`,action:'수치 경사 제한을 충족한 경로로 추천할 수 없습니다.',issues,exploration};
     if(route.graphCoverage?.status==='unavailable')return {kind:'hold',reason:'이 경로의 지도 보행망을 확보하지 못해 횡단 연결 관계를 대조하지 못했습니다. 통행 장애가 확인된 것은 아닙니다.',action:'지도 보행망 연결을 복구해 다시 찾거나 다른 후보의 근거를 비교하세요.',issues,exploration};
@@ -207,7 +225,7 @@ export function evaluateRoute(route:Route,evidence:Record<string,Evidence>,block
     const observed=issues.some(issue=>issue.source==='imagery'&&(issue.status==='clear'||issue.status==='caution'));
     if(!route.samples.length||required||!observed){
         const unknown=required??unknowns.find(issue=>issue.source!=='coverage'||!!evidence[issue.id]?.failure);
-        return {kind:'hold',reason:unknown?`${Math.round(unknown.along)}m 지점: ${unknown.reason}`:'아직 필요한 영상 관찰이 완료되지 않았습니다.',action:exploration.state==='searching'?'필요한 연결부를 확인하고, 끝내 확인되지 않는 연결은 피하는 후보를 비교합니다.':exploration.reason,issues,exploration};
+        return {kind:'hold',reason:unknown?`${Math.round(unknown.along)}m 지점: ${unknown.reason}`:'아직 필요한 영상 관찰이 완료되지 않았습니다.',action:exploration.state==='searching'?'필요한 연결부를 확인하고 있습니다.':'확인하지 못한 연결부의 사진이나 시설 안내를 확인하세요.',issues,exploration};
     }
     if(unknowns.length){
         const first=unknowns[0];

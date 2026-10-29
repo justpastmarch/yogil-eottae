@@ -162,8 +162,10 @@ test('provider underground guidance remains unresolved even after surface images
     mockWalkingProvider(t,[{text:'보행로 이동',coord:walkingCoords[0]},{text:'지하보도 이용',coord:walkingCoords[1]},{text:'목적지 도착',coord:walkingCoords[3]}]);
     const state=await walkingJourney(),candidate=state.candidates[0];
     const operation=reserveJourneyOperation(state);
-    assert.equal(operation?.kind,'replan');
+    assert.equal(operation?.kind,'capture');
     assert.equal(state.exclusions.find(exclusion=>exclusion.sampleId==='connection-step-1')?.reason,'unverified');
+    assert.deepEqual(state.pendingReplans,[]);
+    assert.equal(state.replans,0);
     for(const sample of candidate.samples)await observeSample(state,candidate,sample);
     const result=projectJourneyResult(journeyStateSchema.parse(JSON.parse(JSON.stringify(state))));
     assert.equal(result.recommendedId,null);
@@ -171,39 +173,27 @@ test('provider underground guidance remains unresolved even after surface images
     assert.equal(issue?.status,'unknown');
     assert.equal(issue?.source,'provider');
 });
-test('a route beginning away from the selected start cannot be recommended as a complete journey',async t=>{
+for(const attachment of [
+    {name:'a building centroid about 54 metres from the provider walk start',start:[126.99939,37] satisfies Coord,end:walkingCoords[3]},
+    {name:'a destination about ten metres beyond the provider walk finish',start:walkingCoords[0],end:[127.002112,37] satisfies Coord},
+    {name:'selected places offset from both provider walk endpoints',start:[126.99939,37] satisfies Coord,end:[127.003,37] satisfies Coord},
+])test(`${attachment.name} does not block an otherwise observed outdoor route`,async t=>{
     mockWalkingProvider(t,[{text:'보행로 이동',coord:walkingCoords[0]},{text:'목적지 도착',coord:walkingCoords[3]}]);
-    const state=await createJourneyState({start:{id:'a',name:'역',address:'',coord:[126.999,37]},end:{id:'b',name:'도착',address:'',coord:walkingCoords[3]},profile:'수동 휠체어',goal:'arrival'},walkingConfig,new AbortController().signal);
+    const graph=buildPedestrianGraph({osm3s:{timestamp_osm_base:'2026-01-01T00:00:00Z'},elements:[]});
+    const state=await createJourneyState({start:{id:'a',name:'건물 중심',address:'',coord:attachment.start},end:{id:'b',name:'도착 장소',address:'',coord:attachment.end},profile:'수동 휠체어',goal:'arrival'},walkingConfig,new AbortController().signal,async()=>({kind:'available',graph}));
     const candidate=state.candidates[0];
     for(const sample of candidate.samples)await observeSample(state,candidate,sample);
     const restored=journeyStateSchema.parse(JSON.parse(JSON.stringify(state)));
     const result=projectJourneyResult(restored),decision=result.assessments[candidate.id].decision;
-    const issue=decision.issues.find(point=>point.sampleId==='connection-origin');
-    assert.equal(decision.kind,'hold');
-    assert.equal(issue?.status,'unknown');
-    assert.equal(issue?.source,'geometry');
-    assert.match(issue?.reason??'',/출발지.*직선거리/);
-    assert.equal(result.recommendedId,null);
-    assert.equal(restored.exclusions.some(exclusion=>exclusion.sampleId==='connection-origin'),false);
-});
-test('a route ending far from the selected destination does not claim the destination was reached',async t=>{
-    mockWalkingProvider(t,[{text:'보행로 이동',coord:walkingCoords[0]},{text:'목적지 도착',coord:walkingCoords[3]}]);
-    const state=await createJourneyState({start:{id:'a',name:'출발',address:'',coord:walkingCoords[0]},end:{id:'b',name:'도착',address:'',coord:[127.003,37]},profile:'수동 휠체어',goal:'arrival'},walkingConfig,new AbortController().signal);
-    const candidate=state.candidates[0];
-    for(const sample of candidate.samples)await observeSample(state,candidate,sample);
-    const decision=projectJourneyResult(state).assessments[candidate.id].decision;
-    assert.equal(decision.kind,'hold');
-    assert.equal(decision.issues.find(issue=>issue.sampleId==='connection-destination')?.status,'unknown');
-});
-test('a ten metre destination gap remains an unverified route, not an arrival',async t=>{
-    mockWalkingProvider(t,[{text:'보행로 이동',coord:walkingCoords[0]},{text:'목적지 도착',coord:walkingCoords[3]}]);
-    const state=await createJourneyState({start:{id:'a',name:'출발',address:'',coord:walkingCoords[0]},end:{id:'b',name:'도착',address:'',coord:[127.002112,37]},profile:'수동 휠체어',goal:'arrival'},walkingConfig,new AbortController().signal);
-    const candidate=state.candidates[0];
-    for(const sample of candidate.samples)await observeSample(state,candidate,sample);
-    const issue=projectJourneyResult(state).assessments[candidate.id].decision.issues.find(point=>point.sampleId==='connection-destination');
-    assert.equal(issue?.status,'unknown');
-    assert.match(issue.reason,/직선거리.*이동 경로로 확인되지/);
-    assert.equal(projectJourneyResult(state).recommendedId,null);
+    assert.equal(decision.kind,'recommended');
+    assert.equal(result.recommendedId,candidate.id);
+    assert.deepEqual(candidate.coords,walkingCoords);
+    assert.equal(candidate.distance,178);
+    assert.deepEqual(candidate.samples[0].coord,walkingCoords[0]);
+    assert.deepEqual(candidate.samples.at(-1)?.coord,walkingCoords[3]);
+    assert.equal(candidate.samples.at(-1)?.target,'arrival');
+    assert.deepEqual(candidate.unverifiedConnections,[]);
+    assert.deepEqual(restored.exclusions,[]);
 });
 
 for(const barrier of [
@@ -287,7 +277,7 @@ test('independent map discovery does not erase unresolved grouped provider guida
     for(const sample of candidate.samples)await observeSample(state,candidate,sample);
     assert.equal(projectJourneyResult(state).recommendedId,null);
 });
-test('one explicitly selected crossing cannot resolve two nearby provider crossing instructions',async t=>{
+for(const crossingName of ['', '가람사거리'])test(`one explicitly selected ${crossingName||'unnamed'} crossing cannot resolve two nearby provider crossing instructions`,async t=>{
     const entry:Coord=[127.0006,37],exit:Coord=[127.0008,37];
     const northEntry:Coord=[entry[0],37.0002],northExit:Coord=[exit[0],37.0002];
     const graph=buildPedestrianGraph({osm3s:{timestamp_osm_base:'2026-01-01T00:00:00Z'},elements:[
@@ -309,7 +299,7 @@ test('one explicitly selected crossing cannot resolve two nearby provider crossi
         const coords:Coord[]=via?[walkingCoords[0],entry,northEntry,northExit,exit,walkingCoords[3]]:walkingCoords;
         const steps:Route['steps']=via?[
             {text:'출발',coord:coords[0]},
-            {text:'횡단보도 이용',coord:northEntry},
+            {text:crossingName?crossingName+'에서 횡단보도 이용':'횡단보도 이용',coord:northEntry},
             {text:'횡단보도 이용',coord:[northEntry[0]+0.00001,northEntry[1]]},
             {text:'목적지 도착',coord:walkingCoords[3]},
         ]:[{text:'출발',coord:coords[0]},{text:'목적지 도착',coord:walkingCoords[3]}];
@@ -321,6 +311,9 @@ test('one explicitly selected crossing cannot resolve two nearby provider crossi
     const state=await walkingJourney('arrival',async()=>({kind:'available',graph}));
     const candidate=state.candidates.find(route=>route.crossingChoice?.wayIds.includes(101));
     assert.ok(candidate,'the provider must return an accepted approach to the selected alternate crossing');
+    const expectedLabel=crossingName?crossingName+' 경유':'다른 횡단보도 1';
+    assert.equal(candidate.name,expectedLabel);
+    assert.equal(candidate.crossingChoice?.label,expectedLabel);
     for(const sample of candidate.samples)await observeSample(state,candidate,sample);
     const restored=journeyStateSchema.parse(JSON.parse(JSON.stringify(state)));
     const result=projectJourneyResult(restored),decision=result.assessments[candidate.id].decision;
@@ -386,7 +379,7 @@ for(const geometry of ['missing','off-route','backwards','too-far'] as const)tes
     assert.ok(decision.issues.some(issue=>issue.source==='provider'&&issue.status==='unknown'));
     assert.equal(decision.issues.some(issue=>issue.status==='blocked'),false);
 });
-test('a grouped unknown connection waits for critical observations, then requests only an information-gap bypass',async t=>{
+test('a grouped unknown connection stays unresolved without rerouting away from missing information',async t=>{
     mockWalkingProvider(t,groupedCrossingSteps);
     const state=await walkingJourney(),candidate=state.candidates[0];
     const critical=candidate.samples.filter(sample=>sample.critical);
@@ -404,23 +397,21 @@ test('a grouped unknown connection waits for critical observations, then request
     }
     assert.ok(critical.every(sample=>state.evidence[candidate.id+':'+sample.id]?.stage==='processed'));
     const operation=reserveJourneyOperation(state);
-    assert.equal(operation?.kind,'replan');
+    assert.ok(operation?.kind==='capture','an unresolved crossing must not stop inspection of other route points');
     assert.equal(state.exclusions.length,1);
     assert.equal(state.exclusions[0].reason,'unverified');
     assert.equal(state.exclusions[0].sampleId,candidate.unresolvedCrossings?.[0].id);
-    assert.ok(state.pendingReplans.length>0);
+    assert.deepEqual(state.pendingReplans,[]);
+    assert.equal(state.replans,0);
     const result=projectJourneyResult(state),assessment=result.assessments[candidate.id];
     assert.equal(result.recommendedId,null);
     assert.equal(assessment.decision.kind,'hold');
     assert.deepEqual(assessment.blockedPassageIds,[]);
     assert.equal(assessment.decision.issues.some(issue=>issue.status==='blocked'),false);
     assert.equal(state.exclusions.some(passage=>passage.reason==='obstacle'),false);
-    state.pendingReplans=[];state.replans=4;
-    const next=reserveJourneyOperation(state);
-    assert.ok(next?.kind==='capture','an unresolved crossing must not stop inspection of other route points');
-    assert.notEqual(next.sample.id,candidate.unresolvedCrossings?.[0].id);
-    await observeSample(state,next.route,next.sample);
-    assert.equal(state.evidence[candidate.id+':'+next.sample.id].stage,'processed');
+    assert.notEqual(operation.sample.id,candidate.unresolvedCrossings?.[0].id);
+    await observeSample(state,operation.route,operation.sample);
+    assert.equal(state.evidence[candidate.id+':'+operation.sample.id].stage,'processed');
     assert.equal(projectJourneyResult(state).recommendedId,null,'an unresolved crossing still prevents a full recommendation');
 });
 test('a following destination instruction does not establish a crossing exit',async t=>{

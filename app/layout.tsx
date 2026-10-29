@@ -1,4 +1,4 @@
 import type {Metadata} from 'next';
 import './globals.css';
-export const metadata:Metadata={title:'길이음 | 배리어프리 길찾기',description:'거리의 실제 모습을 확인하고, 나에게 맞는 길을 찾아요.'};
+export const metadata:Metadata={title:'요길어때 | 배리어프리 길찾기',description:'거리의 실제 모습을 확인하고, 나에게 맞는 길을 찾아요.'};
 export default function RootLayout({children}:{children:React.ReactNode}){return <html lang="ko"><body>{children}</body></html>;}

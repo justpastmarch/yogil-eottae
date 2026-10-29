@@ -19,7 +19,7 @@ export default function PanoramaModal({source,onClose}:{source:Source;onClose():
             failed=true;
             clearTimeout(timer);
             view?.setVisible(false);
-            setError(message+' 보관된 판독 사진은 바뀌지 않으며 원본 링크는 별도로 열 수 있습니다.');
+            setError(message);
         };
         const timer=setTimeout(()=>fail('NAVER 거리뷰 응답 시간이 초과되었습니다.'),15000);
         const unsubscribe=subscribeNaverAuthFailure(error=>fail(error.message));
@@ -64,10 +64,10 @@ export default function PanoramaModal({source,onClose}:{source:Source;onClose():
     },[source]);
     return <dialog ref={dialog} className="roadview-dialog" aria-label="NAVER 360도 거리뷰 확인" onCancel={event=>{event.preventDefault();onClose();}} onClick={event=>{if(event.target===event.currentTarget)onClose();}}>
         <div className="roadview-modal-content">
-            <header className="roadview-modal-header"><div><h3>NAVER 360° 거리뷰</h3><p>이 사진의 촬영 위치·시야에서 시작합니다. 현재 현장이나 보관된 판독 사진을 대신하지 않습니다.</p></div><button type="button" onClick={onClose} aria-label="거리뷰 닫기"><X size={20}/></button></header>
+            <header className="roadview-modal-header"><div><h3>NAVER 360° 거리뷰</h3><p>보관 사진의 촬영 위치에서 시작해요. 현재 현장과 다를 수 있어요.</p></div><button type="button" onClick={onClose} aria-label="거리뷰 닫기"><X size={20}/></button></header>
             {error&&<p role="alert" className="notice">{error}</p>}
             <div ref={viewport} className="roadview-modal-viewport" style={{width:'100%',height:'min(60vh, 600px)',position:'relative'}}><div ref={container} style={{width:'100%',height:'100%'}}/></div>
-            <footer className="roadview-modal-footer"><span>© NAVER Corp. · 촬영 {source.capturedMonth??(source.capturedAt===null?'시점 미상':new Date(source.capturedAt).toLocaleDateString('ko-KR'))} · 실제 FOV {source.fov}°</span><a href={source.url} target="_blank" rel="noopener noreferrer">NAVER 촬영 원본 <ExternalLink size={12}/></a></footer>
+            <footer className="roadview-modal-footer"><span>© NAVER Corp. · 촬영 {source.capturedMonth??(source.capturedAt===null?'시점 미상':new Date(source.capturedAt).toLocaleDateString('ko-KR'))}</span><details className="panorama-technical"><summary>외부 원본·촬영 정보</summary><p>거리뷰를 움직여도 보관된 판독 사진은 바뀌지 않아요.</p><a href={source.url} target="_blank" rel="noopener noreferrer">NAVER 촬영 원본 <ExternalLink size={14}/></a><dl><dt>파노라마 ID</dt><dd>{source.panoId}</dd><dt>화각 (FOV)</dt><dd>{source.fov}°</dd><dt>방향·기울기</dt><dd>{source.heading}° · {source.tilt}°</dd></dl></details></footer>
         </div>
     </dialog>;
 }

@@ -123,6 +123,6 @@ export function validateCandidate(candidate: Route, baseline: Route, exclusions:
     if (hasBacktracking(candidate.coords)) return { ok: false, reason: 'backtracking' };
     const limit = Math.min(20000, Math.max(lengthOf(baseline.coords) * 2.5, lengthOf(baseline.coords) + 400));
     if (Math.max(length, candidate.distance) > limit) return { ok: false, reason: 'excessive-detour' };
-    if (exclusions.some(passage => routeTouchesPassage(candidate, passage))) return { ok: false, reason: 'excluded-passage' };
+    if (exclusions.some(passage => passage.reason !== 'unverified' && routeTouchesPassage(candidate, passage))) return { ok: false, reason: 'excluded-passage' };
     return { ok: true };
 }

@@ -36,6 +36,13 @@ yarn-error.log*
 
 # typescript
 next-env.d.ts
+*.tsbuildinfo
+
+# local Python caches and Worker secrets
+__pycache__/
+*.py[cod]
+.dev.vars
+.dev.vars.*
 
 # Maintained Vite plugin and worker sources.
 !/build/

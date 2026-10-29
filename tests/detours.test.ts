@@ -59,6 +59,12 @@ test('candidate validation accepts a connected bypass and rejects duplicates, di
     assert.deepEqual(validateCandidate(reentry, straight, [passage]), { ok: false, reason: 'excluded-passage' });
 });
 
+test('unobserved photo connections do not reject a distinct connected route as a physical obstruction',()=>{
+    const candidate=route([point(0),point(50,30),point(100),point(300)]);
+    assert.deepEqual(validateCandidate(candidate,straight,[{...passage,reason:'unverified'}]),{ok:true});
+    assert.deepEqual(validateCandidate(candidate,straight,[{...passage,reason:'obstacle'}]),{ok:false,reason:'excluded-passage'});
+});
+
 test('candidate validation rejects an out-and-back and a closed loop even when the provider reports a short distance', () => {
     const backtracking = route([point(0), point(100), point(100, 80), point(100), point(300)]);
     assert.deepEqual(validateCandidate(backtracking, straight, []), { ok: false, reason: 'backtracking' });

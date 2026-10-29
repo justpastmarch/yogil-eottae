@@ -1,10 +1,13 @@
 import {z} from 'zod';
 
 export interface NaverLatLng {lat():number;lng():number}
+type NaverZoomOptions={position:number;style:number};
 export interface NaverMap {
   setCenter(point:NaverLatLng):void;
   setZoom(zoom:number,useEffect?:boolean):void;
+  setOptions(options:{zoomControl:boolean;zoomControlOptions:NaverZoomOptions}):void;
   fitBounds(points:NaverLatLng[],margins:{top:number;right:number;bottom:number;left:number}):void;
+  getProjection():{fromCoordToOffset(point:NaverLatLng):{x:number;y:number}};
   autoResize():void;
   destroy():void;
 }
@@ -20,14 +23,16 @@ export interface NaverPanorama {
   setVisible(visible:boolean):void;
 }
 export interface NaverMaps {
-  Map:new(container:HTMLElement,options:{center:NaverLatLng;zoom:number;zoomControl:boolean;zoomControlOptions:{position:number}})=>NaverMap;
+  Map:new(container:HTMLElement,options:{center:NaverLatLng;zoom:number;zoomControl:boolean;zoomControlOptions:NaverZoomOptions})=>NaverMap;
   LatLng:new(latitude:number,longitude:number)=>NaverLatLng;
-  Polyline:new(options:{map:NaverMap;path:NaverLatLng[];strokeWeight:number;strokeColor:string;strokeOpacity:number;strokeStyle:'solid'|'shortdash';zIndex:number;clickable:false})=>NaverOverlay;
+  Polyline:new(options:{map:NaverMap;path:NaverLatLng[];strokeWeight:number;strokeColor:string;strokeOpacity:number;strokeStyle:'solid'|'shortdash';zIndex:number;clickable:boolean})=>NaverOverlay;
   Marker:new(options:{map:NaverMap;position:NaverLatLng;icon:{content:HTMLElement;anchor:{x:number;y:number}};zIndex:number;clickable:boolean;draggable:false})=>NaverOverlay;
   Panorama:new(container:HTMLElement,options:({panoId:string;position?:never}|{position:NaverLatLng;panoId?:never})&{pov:NaverPov})=>NaverPanorama;
-  Position:{BOTTOM_RIGHT:number};
+  Position:{RIGHT_TOP:number};
+  ZoomControlStyle:{LARGE:number;SMALL:number};
   Event:{
-    addListener(target:NaverMap,type:'click',callback:(event:NaverMapClick)=>void):object;
+    addListener(target:NaverMap|NaverOverlay,type:'click',callback:(event:NaverMapClick)=>void):object;
+    addListener(target:NaverMap,type:'idle',callback:()=>void):object;
     addListener(target:NaverPanorama,type:'init'|'pano_changed'|'pov_changed',callback:()=>void):object;
     addListener(target:NaverPanorama,type:'pano_status',callback:(status:string)=>void):object;
     removeListener(listener:object):void;
@@ -99,7 +104,7 @@ export function loadNaverMaps():Promise<NaverMaps>{
   window[callback]=()=>queueMicrotask(()=>{
     if(settled)return;
     const maps=window.naver?.maps;
-    if(!maps||typeof maps.Map!=='function'||typeof maps.LatLng!=='function'||typeof maps.Polyline!=='function'||typeof maps.Marker!=='function'||typeof maps.Panorama!=='function'||typeof maps.Event?.addListener!=='function'||typeof maps.Event?.removeListener!=='function'||typeof maps.Position?.BOTTOM_RIGHT!=='number'){
+    if(!maps||typeof maps.Map!=='function'||typeof maps.LatLng!=='function'||typeof maps.Polyline!=='function'||typeof maps.Marker!=='function'||typeof maps.Panorama!=='function'||typeof maps.Event?.addListener!=='function'||typeof maps.Event?.removeListener!=='function'||typeof maps.Position?.RIGHT_TOP!=='number'||typeof maps.ZoomControlStyle?.LARGE!=='number'||typeof maps.ZoomControlStyle?.SMALL!=='number'){
       fail(new Error('네이버 지도 SDK를 초기화하지 못했습니다.'));
       return;
     }

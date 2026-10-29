@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {cloneDemoJourney} from './journey-demo-cache.ts';
 import {JOURNEY_VERSION,createJourneyState,advanceJourneyState,reserveJourneyOperation,projectJourneyResult,journeyStateSchema,type JourneyInput,type JourneyState,type JourneyOperation,type JourneyDependencies} from './journey.ts';
 import {serverConfig,serverDatabase,type ServerConfig} from './server-config.ts';
 import type {JourneyResult} from './domain.ts';
@@ -86,6 +87,10 @@ export class JourneyJobStore{
 export async function startJourney(input:JourneyInput,ownerId:string,signal:AbortSignal):Promise<JourneySnapshot>{
     const store=new JourneyJobStore(serverDatabase());
     const config=serverConfig();
+    if(import.meta.env?.DEV&&process.env.DEMO_JOURNEY_CACHE==='1'){
+        const cachedId=await cloneDemoJourney(serverDatabase(),input,ownerId,config);
+        if(cachedId)return readJourney(cachedId,ownerId);
+    }
     const state=await createJourneyState(input,config,AbortSignal.any([signal,AbortSignal.timeout(STEP_MS)]));
     signal.throwIfAborted();
     const id=crypto.randomUUID();
@@ -121,7 +126,11 @@ export async function executeJourneyBatch(state:JourneyState,operations:JourneyO
         if(outcome.status!=='fulfilled'){state.phase='failed';continue;}
         const local=outcome.value;
         for(const [key,item] of Object.entries(local.evidence))if(JSON.stringify(item)!==JSON.stringify(baseline.evidence[key]))state.evidence[key]=item;
-        for(const passage of local.exclusions)if(!state.exclusions.some(prior=>prior.id===passage.id))state.exclusions.push(passage);
+        for(const passage of local.exclusions){
+            const index=state.exclusions.findIndex(prior=>prior.id===passage.id);
+            if(index===-1)state.exclusions.push(passage);
+            else if(state.exclusions[index].reason==='unverified'&&passage.reason!=='unverified')state.exclusions[index]=passage;
+        }
         for(const route of local.candidates)if(!state.candidates.some(prior=>prior.id===route.id))state.candidates.unshift(route);
         for(const via of local.pendingReplans)replans.set(JSON.stringify(via),via);
         state.lookups+=local.lookups-baseline.lookups;
